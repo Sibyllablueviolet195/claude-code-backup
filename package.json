@@ -4,7 +4,7 @@
   "description": "Automatic backup and sync of all Claude Code settings to GitHub — including WSL stores from Windows, with cross-OS restore",
   "type": "module",
   "bin": {
-    "claude-code-backup": "./bin/cli.mjs"
+    "claude-code-backup": "bin/cli.mjs"
   },
   "files": [
     "bin/",
@@ -25,7 +25,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/seanGSISG/claude-code-backup"
+    "url": "git+https://github.com/seanGSISG/claude-code-backup.git"
   },
   "engines": {
     "node": ">=18"
