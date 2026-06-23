@@ -1,5 +1,5 @@
 {
-  "name": "@mcpware/claude-code-backup",
+  "name": "@seangsisg/claude-code-backup",
   "version": "0.3.0",
   "description": "Automatic backup and sync of all Claude Code settings to GitHub — including WSL stores from Windows, with cross-OS restore",
   "type": "module",
@@ -21,11 +21,11 @@
     "skills",
     "memories"
   ],
-  "author": "mcpware",
+  "author": "seanGSISG",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/mcpware/claude-code-backup"
+    "url": "https://github.com/seanGSISG/claude-code-backup"
   },
   "engines": {
     "node": ">=18"

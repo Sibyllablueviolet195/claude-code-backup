@@ -188,7 +188,7 @@ async function cmdInit() {
     if (result.taskName) log(`  Scheduled task: ${result.taskName}`);
   } catch (err) {
     log(`\nFailed to install scheduler: ${err.message}`);
-    log("You can run backups manually with: npx @mcpware/claude-code-backup run");
+    log("You can run backups manually with: npx @seangsisg/claude-code-backup run");
   }
 
   // Save config

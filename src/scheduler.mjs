@@ -95,7 +95,7 @@ function launchdDir() {
 }
 
 function plistLabel() {
-  return `com.mcpware.${SERVICE_NAME}`;
+  return `com.seangsisg.${SERVICE_NAME}`;
 }
 
 function plistContent(nodePath, cliPath, intervalSeconds) {

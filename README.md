@@ -39,7 +39,7 @@ and the layout stays flat (`latest/global/…`).
 ## Quick start
 
 ```bash
-npx @mcpware/claude-code-backup init
+npx @seangsisg/claude-code-backup init
 ```
 
 This will:
@@ -52,19 +52,19 @@ This will:
 ## Manual backup
 
 ```bash
-npx @mcpware/claude-code-backup run
+npx @seangsisg/claude-code-backup run
 ```
 
 ## Check status
 
 ```bash
-npx @mcpware/claude-code-backup status
+npx @seangsisg/claude-code-backup status
 ```
 
 ## Remove scheduler
 
 ```bash
-npx @mcpware/claude-code-backup uninstall
+npx @seangsisg/claude-code-backup uninstall
 ```
 
 This only removes the scheduled task. Your backup data stays in `~/.claude-backups/`.
@@ -106,8 +106,8 @@ version history. Files are committed byte-for-byte (`core.autocrlf=false` +
 
 ```bash
 git clone <your-backup-repo> ~/.claude-backups   # on the new machine
-npx @mcpware/claude-code-backup restore           # dry-run: shows exactly what would be written
-npx @mcpware/claude-code-backup restore --apply   # perform the restore
+npx @seangsisg/claude-code-backup restore           # dry-run: shows exactly what would be written
+npx @seangsisg/claude-code-backup restore --apply   # perform the restore
 ```
 
 Restore reads each environment's `manifest.json` and maps every file back to its
