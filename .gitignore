@@ -1,0 +1,10 @@
+# Dependencies
+node_modules/
+
+# Local agent/workflow artifacts (not part of the published tool)
+.claude/
+*.log
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db

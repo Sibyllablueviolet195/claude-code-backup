@@ -10,11 +10,53 @@ import { join } from "node:path";
 const exec = promisify(execFile);
 
 function git(args, cwd) {
-  return exec("git", args, {
+  // core.longpaths=true  — let Git for Windows handle paths over the 260-char
+  //   MAX_PATH limit (deeply-nested plugin skills exceed it, which otherwise
+  //   makes `git add` fail with "Filename too long"). No-op on Linux/macOS.
+  // core.autocrlf=false  — back up files byte-for-byte; never rewrite line
+  //   endings, so restores are faithful and diffs don't churn on Windows.
+  return exec("git", ["-c", "core.longpaths=true", "-c", "core.autocrlf=false", ...args], {
     cwd,
-    timeout: 30_000,
+    timeout: 120_000,
+    // A large initial commit lists thousands of files; the default 1 MB stdout
+    // buffer overflows. Allow generous output so commit/push never EPIPE.
+    maxBuffer: 64 * 1024 * 1024,
     env: { ...process.env, GIT_SSH_COMMAND: process.env.GIT_SSH_COMMAND || "ssh" },
   });
+}
+
+// ── GitHub CLI helpers ───────────────────────────────────────────────
+// Optional onboarding aid: when the `gh` CLI is installed and authenticated,
+// `init` can create the private backup repo automatically over HTTPS instead
+// of requiring the user to pre-create it and configure an SSH key.
+
+/** Is the `gh` CLI installed? */
+export async function ghAvailable() {
+  try { await exec("gh", ["--version"], { timeout: 10_000 }); return true; }
+  catch { return false; }
+}
+
+/** Return the authenticated GitHub login, or null if gh isn't authenticated. */
+export async function ghAuthedUser() {
+  try {
+    const { stdout } = await exec("gh", ["api", "user", "-q", ".login"], { timeout: 15_000 });
+    const login = stdout.trim();
+    return login || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Create a private GitHub repo via `gh` and return its HTTPS clone URL.
+ * Throws if creation fails (e.g. name already taken) so the caller can fall
+ * back to the manual remote prompt.
+ */
+export async function ghCreateRepo(name) {
+  await exec("gh", ["repo", "create", name, "--private"], { timeout: 30_000 });
+  const user = await ghAuthedUser();
+  if (!user) throw new Error("gh repo created but could not resolve authenticated user");
+  return `https://github.com/${user}/${name}.git`;
 }
 
 /**
@@ -34,6 +76,10 @@ export async function isGitRepo(dir) {
  */
 export async function initRepo(dir) {
   await git(["init", "-b", "main"], dir);
+  // Persist the same settings in the repo so manual `git` use in the backup
+  // dir behaves identically (long paths on Windows, no line-ending rewrites).
+  try { await git(["config", "core.longpaths", "true"], dir); } catch {}
+  try { await git(["config", "core.autocrlf", "false"], dir); } catch {}
 }
 
 /**
@@ -67,11 +113,43 @@ export async function getRemoteUrl(dir) {
   }
 }
 
+/** Parse a GitHub remote URL into "owner/repo", or null if not GitHub. */
+export function parseGitHubSlug(url) {
+  if (!url) return null;
+  const m = url.match(/github\.com[:/]+([^/]+)\/(.+?)(?:\.git)?\/?$/i);
+  return m ? `${m[1]}/${m[2]}` : null;
+}
+
+/**
+ * Determine whether the backup remote is public — the tool's whole point is to
+ * back up ~/.claude, which holds secrets (MCP API keys, settings.local.json,
+ * session transcripts), so backups must go to a PRIVATE repo.
+ *
+ * Returns { state: "none"|"private"|"public"|"unknown", slug?, url? }.
+ * "unknown" when the remote isn't GitHub or gh can't verify it — we don't block
+ * those (a legitimate private SSH remote is common), only warn.
+ */
+export async function getRemoteVisibility(dir) {
+  const url = await getRemoteUrl(dir);
+  if (!url) return { state: "none" };
+  const slug = parseGitHubSlug(url);
+  if (!slug || !(await ghAvailable())) return { state: "unknown", url, slug: slug || undefined };
+  try {
+    const { stdout } = await exec("gh", ["repo", "view", slug, "--json", "visibility", "-q", ".visibility"], { timeout: 15_000 });
+    const v = stdout.trim().toUpperCase();
+    return { state: v === "PUBLIC" ? "public" : v === "PRIVATE" ? "private" : "unknown", slug, url };
+  } catch {
+    return { state: "unknown", slug, url };
+  }
+}
+
 /**
  * Stage all changes, commit, and push.
- * Returns { committed, pushed, message }
+ * @param {string} dir
+ * @param {{ allowPublic?: boolean }} [opts]  bypass the public-remote guard
+ * Returns { committed, pushed, blocked?, message }
  */
-export async function commitAndPush(dir) {
+export async function commitAndPush(dir, opts = {}) {
   // Stage everything
   await git(["add", "-A"], dir);
 
@@ -90,9 +168,23 @@ export async function commitAndPush(dir) {
 
   // Push if remote exists
   if (await hasRemote(dir)) {
+    // Guard: never push a ~/.claude backup to a PUBLIC repo — it can contain
+    // MCP API keys, settings.local.json, and session transcripts.
+    const vis = await getRemoteVisibility(dir);
+    if (vis.state === "public" && !opts.allowPublic) {
+      return {
+        committed: true, pushed: false, blocked: true,
+        message:
+          `Refusing to push: backup remote ${vis.slug || ""} is PUBLIC.\n` +
+          `  Your backup can contain secrets (MCP keys, settings.local.json, sessions).\n` +
+          `  Point origin at a PRIVATE repo, or re-run with --allow-public to override.`,
+      };
+    }
     try {
       await git(["push", "-u", "origin", "main"], dir);
-      return { committed: true, pushed: true, message: `Committed and pushed: ${commitMsg}` };
+      let message = `Committed and pushed: ${commitMsg}`;
+      if (vis.state === "unknown") message += " (note: could not verify the remote is private)";
+      return { committed: true, pushed: true, message };
     } catch (err) {
       return { committed: true, pushed: false, message: `Committed but push failed: ${err.message}` };
     }

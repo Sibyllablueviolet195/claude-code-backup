@@ -1,7 +1,7 @@
 {
   "name": "@mcpware/claude-code-backup",
-  "version": "0.1.0",
-  "description": "Automatic backup and sync of all Claude Code settings to GitHub",
+  "version": "0.3.0",
+  "description": "Automatic backup and sync of all Claude Code settings to GitHub — including WSL stores from Windows, with cross-OS restore",
   "type": "module",
   "bin": {
     "claude-code-backup": "./bin/cli.mjs"
@@ -13,7 +13,9 @@
   "keywords": [
     "claude-code",
     "backup",
+    "restore",
     "sync",
+    "wsl",
     "dotfiles",
     "settings",
     "skills",

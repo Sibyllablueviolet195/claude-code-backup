@@ -8,25 +8,29 @@
 
 import { readdir, stat, readFile, access, open } from "node:fs/promises";
 import { join, relative, basename, extname } from "node:path";
-import { homedir, platform } from "node:os";
-
-const HOME = homedir();
-const CLAUDE_DIR = join(HOME, ".claude");
-
-// Platform-aware managed config directory
-// Linux: /etc/claude-code/  macOS: /Library/Application Support/ClaudeCode/
-const MANAGED_DIR = platform() === "darwin"
-  ? "/Library/Application Support/ClaudeCode"
-  : "/etc/claude-code";
+import { nativeEnvironment } from "./environments.mjs";
 
 /**
- * Check if a scope's .claude/ dir is the same as the global CLAUDE_DIR.
+ * Build the default scan context — the local store of the current process.
+ * Every scanner reads paths from `ctx` (ctx.claudeDir, ctx.home, ctx.managedDir,
+ * ctx.osPlatform, ctx.pathStyle, ctx.accessVia, ctx.uncRoot) instead of from
+ * module-level constants, so a single run can scan multiple environments
+ * (e.g. Windows-native + a WSL distro reached over a UNC share).
+ *
+ * @typedef {import("./environments.mjs").Environment} Environment
+ */
+export function nativeCtx() {
+  return nativeEnvironment();
+}
+
+/**
+ * Check if a scope's .claude/ dir is the same as the environment's global .claude.
  * This happens when repoDir === HOME (e.g. /home/user).
  * In that case, project-scoped scanners should skip .claude/ to avoid
  * double-counting items already scanned by the global scope.
  */
-function isGlobalClaudeDir(scope) {
-  return scope.repoDir && join(scope.repoDir, ".claude") === CLAUDE_DIR;
+function isGlobalClaudeDir(scope, ctx) {
+  return scope.repoDir && join(scope.repoDir, ".claude") === ctx.claudeDir;
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -135,18 +139,22 @@ function parseFrontmatter(content) {
 
 // ── Settings overrides cache ─────────────────────────────────────────
 
-let _settingsCache = null;
-
-/** Read merged user settings (settings.json + settings.local.json) once. */
-async function getSettingsOverrides() {
-  if (_settingsCache) return _settingsCache;
-  _settingsCache = {};
+/**
+ * Read merged user settings (settings.json + settings.local.json) once per scan.
+ * The cache is a per-scan object ({ value }) threaded through scanners rather
+ * than a module global, so concurrent scans of different environments don't
+ * clobber each other.
+ */
+async function getSettingsOverrides(ctx, cache) {
+  if (cache.value) return cache.value;
+  const merged = {};
   for (const f of ["settings.json", "settings.local.json"]) {
-    const content = await safeReadFile(join(CLAUDE_DIR, f));
+    const content = await safeReadFile(join(ctx.claudeDir, f));
     if (!content) continue;
-    try { Object.assign(_settingsCache, JSON.parse(content)); } catch {}
+    try { Object.assign(merged, JSON.parse(content)); } catch {}
   }
-  return _settingsCache;
+  cache.value = merged;
+  return merged;
 }
 
 // ── Path decoding ────────────────────────────────────────────────────
@@ -158,17 +166,22 @@ async function getSettingsOverrides() {
  * Strategy: starting from root, greedily match the longest existing directory
  * at each level by consuming segments from the encoded name.
  */
-async function resolveEncodedProjectPath(encoded) {
+async function resolveEncodedProjectPath(encoded, ctx) {
   const segments = encoded.replace(/^-/, "").split("-");
-  let rootPath = "/";
+  let rootPath;
   let startIdx = 0;
 
-  // Windows: encoded paths look like "c--Users-user-Desktop-project"
-  // The drive letter "c" becomes the first segment, followed by empty string from "--"
-  // Need to detect and convert to "C:\"
-  if (platform() === "win32" && segments.length >= 2 && segments[0].length === 1 && segments[1] === "") {
+  if (ctx.pathStyle === "win" && segments.length >= 2 && segments[0].length === 1 && segments[1] === "") {
+    // Windows: encoded paths look like "c--Users-user-Desktop-project".
+    // The drive letter "c" is segment 0, followed by an empty segment from "--".
     rootPath = segments[0].toUpperCase() + ":\\";
     startIdx = 2;
+  } else if (ctx.accessVia === "unc") {
+    // WSL store reached from Windows: decode against the distro's UNC root
+    // (e.g. "\\wsl.localhost\Ubuntu") so on-disk verification hits the 9p share.
+    rootPath = ctx.uncRoot;
+  } else {
+    rootPath = "/";
   }
 
   // Normalize for comparison: lowercase, replace _ with -
@@ -224,7 +237,7 @@ async function resolveEncodedProjectPath(encoded) {
  * Discover all scopes by scanning ~/.claude/projects/ and known repo dirs.
  * Returns an array of scope objects (global + projects, all with parentId: "global").
  */
-async function discoverScopes() {
+async function discoverScopes(ctx) {
   const scopes = [];
 
   // Global scope
@@ -239,7 +252,7 @@ async function discoverScopes() {
   });
 
   // Scan ~/.claude/projects/ for project scopes
-  const projectsDir = join(CLAUDE_DIR, "projects");
+  const projectsDir = join(ctx.claudeDir, "projects");
   if (!(await exists(projectsDir))) return scopes;
 
   const projectDirs = await readdir(projectsDir, { withFileTypes: true });
@@ -252,7 +265,7 @@ async function discoverScopes() {
     // The encoding replaces / with - and prepends -.
     // E.g. -home-user-mycompany-repo1 → /home/user/mycompany/repo1
     // Since directory names can contain dashes, we resolve by checking which real path exists.
-    const realPath = await resolveEncodedProjectPath(d.name);
+    const realPath = await resolveEncodedProjectPath(d.name, ctx);
     if (!realPath) continue;
 
     const shortName = basename(realPath);
@@ -273,10 +286,11 @@ async function discoverScopes() {
     }
   }
 
-  // Sort by path depth (shorter = parent) then alphabetically
+  // Sort by path depth (shorter = parent) then alphabetically.
+  // Split on both separators so Windows/UNC backslash paths sort correctly.
   projectEntries.sort((a, b) => {
-    const da = a.realPath.split("/").length;
-    const db = b.realPath.split("/").length;
+    const da = a.realPath.split(/[\\/]/).length;
+    const db = b.realPath.split(/[\\/]/).length;
     if (da !== db) return da - db;
     return a.realPath.localeCompare(b.realPath);
   });
@@ -311,13 +325,13 @@ async function discoverScopes() {
  * 1. Project-level: <repoDir>/skills-lock.json (version 1)
  * 2. Global: ~/.agents/.skill-lock.json (version 3)
  */
-async function loadSkillBundles(repoDir) {
+async function loadSkillBundles(repoDir, ctx) {
   const bundles = new Map();
 
   // Paths to check (project-level first, then global)
   const lockPaths = [];
   if (repoDir) lockPaths.push(join(repoDir, "skills-lock.json"));
-  lockPaths.push(join(HOME, ".agents", ".skill-lock.json"));
+  lockPaths.push(join(ctx.home, ".agents", ".skill-lock.json"));
 
   for (const lockPath of lockPaths) {
     const content = await safeReadFile(lockPath);
@@ -341,15 +355,15 @@ async function loadSkillBundles(repoDir) {
 
 // ── Item scanners ────────────────────────────────────────────────────
 
-async function scanMemories(scope) {
+async function scanMemories(scope, ctx, cache) {
   const items = [];
-  const settings = await getSettingsOverrides();
+  const settings = await getSettingsOverrides(ctx, cache);
   const customMemDir = settings.autoMemoryDirectory;
   let memDir;
   if (scope.id === "global") {
-    memDir = join(CLAUDE_DIR, "memory");
+    memDir = join(ctx.claudeDir, "memory");
   } else if (customMemDir) {
-    memDir = join(scope.repoDir || process.cwd(), customMemDir);
+    memDir = join(scope.repoDir || ctx.home, customMemDir);
   } else {
     memDir = join(scope.claudeProjectDir, "memory");
   }
@@ -382,24 +396,24 @@ async function scanMemories(scope) {
   return items;
 }
 
-async function scanSkills(scope) {
+async function scanSkills(scope, ctx) {
   const items = [];
   let skillDirs = [];
 
   if (scope.id === "global") {
     // Global skills: ~/.claude/skills/ + managed
-    const dir = join(CLAUDE_DIR, "skills");
+    const dir = join(ctx.claudeDir, "skills");
     if (await exists(dir)) skillDirs.push(dir);
-    const managedSkills = join(MANAGED_DIR, ".claude", "skills");
+    const managedSkills = join(ctx.managedDir, ".claude", "skills");
     if (await exists(managedSkills)) skillDirs.push(managedSkills);
-  } else if (scope.repoDir && !isGlobalClaudeDir(scope)) {
+  } else if (scope.repoDir && !isGlobalClaudeDir(scope, ctx)) {
     // Per-repo skills: repo/.claude/skills/
     const dir = join(scope.repoDir, ".claude", "skills");
     if (await exists(dir)) skillDirs.push(dir);
   }
 
   // Load bundle info from skills-lock.json
-  const bundleMap = await loadSkillBundles(scope.repoDir);
+  const bundleMap = await loadSkillBundles(scope.repoDir, ctx);
 
   for (const skillsRoot of skillDirs) {
     const entries = await readdir(skillsRoot, { withFileTypes: true });
@@ -470,7 +484,8 @@ async function scanSkills(scope) {
   return items;
 }
 
-async function scanMcpServers(scope) {
+async function scanMcpServers(scope, ctx) {
+  const { claudeDir: CLAUDE_DIR, home: HOME, managedDir: MANAGED_DIR } = ctx;
   const items = [];
   let mcpPaths = [];
 
@@ -588,7 +603,7 @@ async function scanMcpServers(scope) {
   // Also scan mcpServers embedded inside settings files
   const settingsFiles = scope.id === "global"
     ? [join(CLAUDE_DIR, "settings.json"), join(CLAUDE_DIR, "settings.local.json")]
-    : (scope.repoDir && !isGlobalClaudeDir(scope))
+    : (scope.repoDir && !isGlobalClaudeDir(scope, ctx))
       ? [join(scope.repoDir, ".claude", "settings.json"), join(scope.repoDir, ".claude", "settings.local.json")]
       : [];
 
@@ -652,7 +667,8 @@ async function scanMcpServers(scope) {
   return items;
 }
 
-async function scanConfigs(scope) {
+async function scanConfigs(scope, ctx) {
+  const { claudeDir: CLAUDE_DIR, managedDir: MANAGED_DIR } = ctx;
   const items = [];
   const configs = scope.id === "global"
     ? [
@@ -662,7 +678,7 @@ async function scanConfigs(scope) {
         { name: "CLAUDE.md (managed)", path: join(MANAGED_DIR, "CLAUDE.md"), desc: "Enterprise managed instructions" },
         { name: "managed-settings.json", path: join(MANAGED_DIR, "managed-settings.json"), desc: "Enterprise managed settings" },
       ]
-    : (scope.repoDir && !isGlobalClaudeDir(scope))
+    : (scope.repoDir && !isGlobalClaudeDir(scope, ctx))
       ? [
           { name: "CLAUDE.md", path: join(scope.repoDir, "CLAUDE.md"), desc: "Project instructions" },
           { name: ".claude/CLAUDE.md", path: join(scope.repoDir, ".claude", "CLAUDE.md"), desc: "Project instructions" },
@@ -693,7 +709,8 @@ async function scanConfigs(scope) {
   return items;
 }
 
-async function scanHooks(scope) {
+async function scanHooks(scope, ctx) {
+  const { claudeDir: CLAUDE_DIR, managedDir: MANAGED_DIR } = ctx;
   const items = [];
 
   const hookSources = scope.id === "global"
@@ -702,7 +719,7 @@ async function scanHooks(scope) {
         { path: join(CLAUDE_DIR, "settings.local.json"), label: "settings.local.json" },
         { path: join(MANAGED_DIR, "managed-settings.json"), label: "managed-settings.json" },
       ]
-    : (scope.repoDir && !isGlobalClaudeDir(scope))
+    : (scope.repoDir && !isGlobalClaudeDir(scope, ctx))
       ? [
           { path: join(scope.repoDir, ".claude", "settings.json"), label: "settings.json" },
           { path: join(scope.repoDir, ".claude", "settings.local.json"), label: "settings.local.json" },
@@ -826,14 +843,15 @@ function emitSettingRecords(settings, scopeId, sourceFile, sourceTier) {
   return records;
 }
 
-async function scanSettings(scope) {
+async function scanSettings(scope, ctx) {
+  const { claudeDir: CLAUDE_DIR, managedDir: MANAGED_DIR } = ctx;
   const sources = scope.id === "global"
     ? [
         { path: join(CLAUDE_DIR, "settings.json"), sourceFile: "settings.json", sourceTier: "user" },
         { path: join(CLAUDE_DIR, "settings.local.json"), sourceFile: "settings.local.json", sourceTier: "local" },
         { path: join(MANAGED_DIR, "managed-settings.json"), sourceFile: "managed-settings.json", sourceTier: "managed" },
       ]
-    : (scope.repoDir && !isGlobalClaudeDir(scope))
+    : (scope.repoDir && !isGlobalClaudeDir(scope, ctx))
       ? [
           { path: join(scope.repoDir, ".claude", "settings.json"), sourceFile: "settings.json", sourceTier: "project" },
           { path: join(scope.repoDir, ".claude", "settings.local.json"), sourceFile: "settings.local.json", sourceTier: "local" },
@@ -852,9 +870,9 @@ async function scanSettings(scope) {
   return records;
 }
 
-async function scanPlugins() {
+async function scanPlugins(ctx) {
   const items = [];
-  const cacheDir = join(CLAUDE_DIR, "plugins", "cache");
+  const cacheDir = join(ctx.claudeDir, "plugins", "cache");
   if (!(await exists(cacheDir))) return items;
 
   try {
@@ -889,14 +907,14 @@ async function scanPlugins() {
   return items;
 }
 
-async function scanPlans(scope) {
+async function scanPlans(scope, ctx, cache) {
   const items = [];
   let plansDir = null;
   if (scope.id === "global") {
-    const settings = await getSettingsOverrides();
+    const settings = await getSettingsOverrides(ctx, cache);
     plansDir = settings.plansDirectory
-      ? join(process.cwd(), settings.plansDirectory)
-      : join(CLAUDE_DIR, "plans");
+      ? join(ctx.home, settings.plansDirectory)
+      : join(ctx.claudeDir, "plans");
   } else if (scope.claudeProjectDir) {
     plansDir = join(scope.claudeProjectDir, "plans");
   }
@@ -936,14 +954,14 @@ async function scanPlans(scope) {
   return items;
 }
 
-async function scanRules(scope) {
+async function scanRules(scope, ctx) {
   const items = [];
   let rulesDirs = [];
 
   if (scope.id === "global") {
-    const dir = join(CLAUDE_DIR, "rules");
+    const dir = join(ctx.claudeDir, "rules");
     if (await exists(dir)) rulesDirs.push(dir);
-  } else if (scope.repoDir && !isGlobalClaudeDir(scope)) {
+  } else if (scope.repoDir && !isGlobalClaudeDir(scope, ctx)) {
     const dir = join(scope.repoDir, ".claude", "rules");
     if (await exists(dir)) rulesDirs.push(dir);
   }
@@ -984,14 +1002,14 @@ async function scanRules(scope) {
   return items;
 }
 
-async function scanCommands(scope) {
+async function scanCommands(scope, ctx) {
   const items = [];
   let cmdDirs = [];
 
   if (scope.id === "global") {
-    const dir = join(CLAUDE_DIR, "commands");
+    const dir = join(ctx.claudeDir, "commands");
     if (await exists(dir)) cmdDirs.push(dir);
-  } else if (scope.repoDir && !isGlobalClaudeDir(scope)) {
+  } else if (scope.repoDir && !isGlobalClaudeDir(scope, ctx)) {
     const dir = join(scope.repoDir, ".claude", "commands");
     if (await exists(dir)) cmdDirs.push(dir);
   }
@@ -1024,14 +1042,14 @@ async function scanCommands(scope) {
   return items;
 }
 
-async function scanAgents(scope) {
+async function scanAgents(scope, ctx) {
   const items = [];
   let agentDirs = [];
 
   if (scope.id === "global") {
-    const dir = join(CLAUDE_DIR, "agents");
+    const dir = join(ctx.claudeDir, "agents");
     if (await exists(dir)) agentDirs.push(dir);
-  } else if (scope.repoDir && !isGlobalClaudeDir(scope)) {
+  } else if (scope.repoDir && !isGlobalClaudeDir(scope, ctx)) {
     const dir = join(scope.repoDir, ".claude", "agents");
     if (await exists(dir)) agentDirs.push(dir);
   }
@@ -1177,10 +1195,10 @@ async function scanSessions(scope) {
  * When managed-mcp.json exists, Claude Code ignores ALL user/project/plugin servers.
  * Also checks managed settings for allowManagedMcpServersOnly policy.
  */
-export async function detectEnterpriseMcp() {
+export async function detectEnterpriseMcp(ctx = nativeCtx()) {
   const mcpPaths = [
-    join(MANAGED_DIR, "managed-mcp.json"),
-    join(HOME, ".claude", "managed", "managed-mcp.json"),
+    join(ctx.managedDir, "managed-mcp.json"),
+    join(ctx.claudeDir, "managed", "managed-mcp.json"),
   ];
 
   for (const mcpPath of mcpPaths) {
@@ -1197,7 +1215,7 @@ export async function detectEnterpriseMcp() {
   }
 
   // Also check managed settings for allowManagedMcpServersOnly
-  const managedSettingsPath = join(MANAGED_DIR, "managed-settings.json");
+  const managedSettingsPath = join(ctx.managedDir, "managed-settings.json");
   const msContent = await safeReadFile(managedSettingsPath);
   if (msContent) {
     try {
@@ -1211,32 +1229,36 @@ export async function detectEnterpriseMcp() {
   return { active: false, path: null, serverCount: 0, serverNames: [] };
 }
 
-export async function scan() {
-  _settingsCache = null; // reset cache each scan
-  const scopes = await discoverScopes();
+export async function scan(ctx = nativeCtx()) {
+  const cache = { value: null }; // per-scan settings cache (re-entrant across environments)
+  const scopes = await discoverScopes(ctx);
   const allItems = [];
 
   // Scan per-scope items
   for (const scope of scopes) {
     const [memories, skills, mcpServers, configs, hooks, plans, sessions, rules, commands, agents, settings] = await Promise.all([
-      scanMemories(scope),
-      scanSkills(scope),
-      scanMcpServers(scope),
-      scanConfigs(scope),
-      scanHooks(scope),
-      scanPlans(scope),
-      scanSessions(scope),
-      scanRules(scope),
-      scanCommands(scope),
-      scanAgents(scope),
-      scanSettings(scope),
+      scanMemories(scope, ctx, cache),
+      scanSkills(scope, ctx),
+      scanMcpServers(scope, ctx),
+      scanConfigs(scope, ctx),
+      scanHooks(scope, ctx),
+      scanPlans(scope, ctx, cache),
+      scanSessions(scope, ctx),
+      scanRules(scope, ctx),
+      scanCommands(scope, ctx),
+      scanAgents(scope, ctx),
+      scanSettings(scope, ctx),
     ]);
     allItems.push(...memories, ...skills, ...mcpServers, ...configs, ...hooks, ...plans, ...sessions, ...rules, ...commands, ...agents, ...settings);
   }
 
   // Scan global-only items
-  const plugins = await scanPlugins();
+  const plugins = await scanPlugins(ctx);
   allItems.push(...plugins);
+
+  // Stamp the environment id on every item so the exporter can namespace
+  // backups by environment (Windows-native vs each WSL distro).
+  for (const item of allItems) item.envId = ctx.id;
 
   // Build counts
   const counts = { total: allItems.length };
@@ -1245,17 +1267,17 @@ export async function scan() {
   }
 
   // Detect enterprise MCP mode
-  const enterpriseMcp = await detectEnterpriseMcp();
+  const enterpriseMcp = await detectEnterpriseMcp(ctx);
 
-  return { scopes, items: allItems, counts, enterpriseMcp };
+  return { envId: ctx.id, scopes, items: allItems, counts, enterpriseMcp };
 }
 
 /**
  * Read disabled MCP servers for a project from ~/.claude.json.
  * Mirrors ccsrc: projects[absolutePath].disabledMcpServers
  */
-export async function getDisabledMcpServers(projectPath) {
-  const claudeJsonPath = join(HOME, ".claude.json");
+export async function getDisabledMcpServers(projectPath, ctx = nativeCtx()) {
+  const claudeJsonPath = join(ctx.home, ".claude.json");
   try {
     const raw = await readFile(claudeJsonPath, "utf-8");
     const config = JSON.parse(raw);
@@ -1270,8 +1292,8 @@ export async function getDisabledMcpServers(projectPath) {
  * Set disabled MCP servers for a project in ~/.claude.json.
  * Matches the behavior of `/mcp disable <name>` in Claude Code.
  */
-export async function setDisabledMcpServers(projectPath, disabledList) {
-  const claudeJsonPath = join(HOME, ".claude.json");
+export async function setDisabledMcpServers(projectPath, disabledList, ctx = nativeCtx()) {
+  const claudeJsonPath = join(ctx.home, ".claude.json");
   let config = {};
   try { config = JSON.parse(await readFile(claudeJsonPath, "utf-8")); } catch { /* new file */ }
   if (!config.projects) config.projects = {};
@@ -1285,11 +1307,11 @@ export async function setDisabledMcpServers(projectPath, disabledList) {
  * Scan MCP allowlist/denylist policy from settings files.
  * Returns structured policy data for the policy editor UI.
  */
-export async function scanMcpPolicy() {
+export async function scanMcpPolicy(ctx = nativeCtx()) {
   const settingsFiles = [
-    { path: join(HOME, ".claude", "settings.json"), tier: "user" },
-    { path: join(HOME, ".claude", "settings.local.json"), tier: "local" },
-    { path: "/etc/claude-code/managed-settings.json", tier: "managed" },
+    { path: join(ctx.claudeDir, "settings.json"), tier: "user" },
+    { path: join(ctx.claudeDir, "settings.local.json"), tier: "local" },
+    { path: join(ctx.managedDir, "managed-settings.json"), tier: "managed" },
   ];
 
   const allowlist = [];
