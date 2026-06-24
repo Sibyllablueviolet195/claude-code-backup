@@ -16,7 +16,7 @@ import { fileURLToPath } from "node:url";
 import { mkdir, readFile, writeFile, access, readdir, stat } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { acquireLock, releaseLock, ensureLocalIgnores, LOCAL_IGNORES } from "../src/runlock.mjs";
-import { renderMachineLines, formatAge } from "../src/cli-ui.mjs";
+import { renderMachineLines, formatAge, isStale, renderCheck, tallyChecks } from "../src/cli-ui.mjs";
 
 const HOME = homedir();
 const BACKUP_DIR = join(HOME, ".claude-backups");
@@ -446,6 +446,80 @@ async function cmdStatus() {
   }
 }
 
+async function cmdDoctor() {
+  const { status: schedStatus } = await import("../src/scheduler.mjs");
+  const { readBackupIndex } = await import("../src/exporter.mjs");
+  const { isGitRepo, hasRemote, getRemoteUrl, getRemoteVisibility, getBranchSync } =
+    await import("../src/git-sync.mjs");
+  const { localMachineUuid } = await import("../src/sync-config.mjs");
+
+  const config = await loadConfig();
+  const interval = config.interval || 4;
+  const checks = [];
+
+  log("claude-code-backup — doctor\n");
+
+  // Repo present?
+  const isRepo = await isGitRepo(BACKUP_DIR);
+  checks.push(isRepo
+    ? { level: "ok", label: `Backup repo initialized (${BACKUP_DIR})` }
+    : { level: "fail", label: "Backup repo not initialized", hint: "run 'claude-code-backup init'" });
+
+  if (isRepo) {
+    // Remote + visibility — the load-bearing safety check (backups hold secrets).
+    if (!(await hasRemote(BACKUP_DIR))) {
+      checks.push({ level: "warn", label: "No remote configured", hint: "run 'init' to link a PRIVATE repo (backups stay local otherwise)" });
+    } else {
+      checks.push({ level: "ok", label: `Remote configured (${await getRemoteUrl(BACKUP_DIR)})` });
+      const vis = await getRemoteVisibility(BACKUP_DIR);
+      if (vis.state === "private") checks.push({ level: "ok", label: "Remote is private" });
+      else if (vis.state === "public") checks.push({ level: "fail", label: "Remote is PUBLIC — backups are blocked", hint: "make the repo private (it holds secrets), or run with --allow-public" });
+      else checks.push({ level: "warn", label: "Remote visibility could not be verified", hint: "ensure the remote is private; the backup holds secrets" });
+
+      const bs = await getBranchSync(BACKUP_DIR);
+      if (bs.hasUpstream && bs.ahead > 0) checks.push({ level: "warn", label: `${bs.ahead} local commit(s) not pushed`, hint: "run 'claude-code-backup run', or 'git push' in the backup dir" });
+    }
+
+    // Machine identity (C1) — env dirs and the leak guard depend on it.
+    const uuid = await localMachineUuid(BACKUP_DIR);
+    checks.push(uuid
+      ? { level: "ok", label: "Machine identity present (machine-id.json)" }
+      : { level: "warn", label: "No machine identity yet", hint: "run 'init' or a backup to mint machine-id.json" });
+  }
+
+  // Scheduler installed?
+  let sched = "";
+  try { sched = await schedStatus(); } catch {}
+  const installed = sched && !/not installed|not loaded|no such|could not|disabled/i.test(sched);
+  checks.push(installed
+    ? { level: "ok", label: `Scheduler installed (every ${interval}h)` }
+    : { level: "warn", label: "Scheduler not installed", hint: "run 'claude-code-backup init' to schedule backups" });
+
+  // Freshness.
+  if (!config.lastRun) {
+    checks.push({ level: "warn", label: "No backup has run yet", hint: "run 'claude-code-backup run'" });
+  } else if (isStale(config.lastRun, interval, Date.now())) {
+    checks.push({ level: "warn", label: `Last backup is stale (${formatAge(config.lastRun, Date.now())})`, hint: "run 'claude-code-backup run'" });
+  } else {
+    checks.push({ level: "ok", label: `Last backup is fresh (${formatAge(config.lastRun, Date.now())})` });
+  }
+
+  // Backup index parseable (and how many machines it sees).
+  if (isRepo) {
+    try {
+      const { environments } = await readBackupIndex(join(BACKUP_DIR, "latest"));
+      checks.push({ level: "ok", label: `Backup index readable (${environments.length} env dir(s))` });
+    } catch (err) {
+      checks.push({ level: "fail", label: `Backup index unreadable: ${err.message}`, hint: "a backup may be corrupt; re-run 'claude-code-backup run'" });
+    }
+  }
+
+  for (const c of checks) log(renderCheck(c));
+  const t = tallyChecks(checks);
+  log(`\n${t.ok} OK · ${t.warn} warning(s) · ${t.fail} error(s)`);
+  if (t.fail > 0) process.exitCode = 1;
+}
+
 async function cmdUninstall() {
   const { remove } = await import("../src/scheduler.mjs");
   await remove();
@@ -531,6 +605,9 @@ switch (command) {
   case "list":
     await cmdList();
     break;
+  case "doctor":
+    await cmdDoctor();
+    break;
   case "restore":
     await cmdRestore();
     break;
@@ -544,6 +621,7 @@ switch (command) {
     log("  claude-code-backup run         Run backup now");
     log("  claude-code-backup status      Show backup status (add --verbose for raw scheduler output)");
     log("  claude-code-backup list        List machines/envs in the backup");
+    log("  claude-code-backup doctor      Diagnose repo/remote/scheduler/freshness");
     log("  claude-code-backup restore     Restore from backup (dry-run; add --apply)");
     log("  claude-code-backup uninstall   Remove scheduled backup\n");
     log("  run flags:     --quiet  --allow-public  --confirm-collision");

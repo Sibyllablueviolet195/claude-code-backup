@@ -264,7 +264,7 @@ This machine:
 - [ ] **UX** new init question script
 - [x] **UX** status rewrite (scan env dirs, group by label, staleness/unpushed/warnings)
 - [x] **UX** `list` command
-- [ ] **UX** `doctor` command
+- [x] **UX** `doctor` command
 - [ ] **UX** `restore --interactive`
 - [ ] **C9** `prune` + skip unreachable sources in restore
 - [ ] **C4** deletion tombstones (with M2 sync relationships)

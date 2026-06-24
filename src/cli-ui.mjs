@@ -76,6 +76,22 @@ export function groupByMachine(environments) {
   return groups;
 }
 
+/** Icons for doctor/check output, keyed by severity level. */
+export const CHECK_ICON = { ok: "✓", warn: "⚠", fail: "✗" };
+
+/** Render one diagnostic check line: "  <icon> <label>  →  <hint>". */
+export function renderCheck(c) {
+  const icon = CHECK_ICON[c.level] || "?";
+  return `  ${icon} ${c.label}${c.hint ? `  →  ${c.hint}` : ""}`;
+}
+
+/** Tally a list of {level} checks into { ok, warn, fail } counts. */
+export function tallyChecks(checks) {
+  const t = { ok: 0, warn: 0, fail: 0 };
+  for (const c of checks) if (t[c.level] !== undefined) t[c.level]++;
+  return t;
+}
+
 /**
  * Render the "Machines in backup" block as an array of lines.
  *
