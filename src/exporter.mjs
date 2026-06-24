@@ -18,6 +18,7 @@ import { join, basename, dirname } from "node:path";
 import { homedir } from "node:os";
 import { scan } from "./scanner.mjs";
 import { discoverEnvironments, persistedMachineIdentity, uuid8, machineId } from "./environments.mjs";
+import { loadExcludeConfig, isExcludedByConfig } from "./exclude-config.mjs";
 
 const BACKUP_DIR = join(homedir(), ".claude-backups");
 
@@ -84,8 +85,9 @@ function legacyEnvId(env, hostMid) {
  * entries plus copy stats. Mirrors the destination-name logic so manifest
  * backupPaths match what lands on disk.
  */
-async function exportEnvItems(data, env, envBase) {
+async function exportEnvItems(data, env, envBase, excludeConfig) {
   let copied = 0;
+  let excluded = 0;
   const errors = [];
   const manifestItems = [];
   const exportedAt = new Date().toISOString();   // M5: stamp items for conflict detection
@@ -98,6 +100,8 @@ async function exportEnvItems(data, env, envBase) {
 
   for (const item of data.items) {
     if (!isExportable(item)) continue;
+    // M4: per-machine exclude.json — drop matching items before backing them up.
+    if (isExcludedByConfig(item, excludeConfig, repoRootByScope.get(item.scopeId))) { excluded++; continue; }
     try {
       const subDir = join(envBase, item.scopeId, item.category);
       await mkdir(subDir, { recursive: true });
@@ -149,7 +153,7 @@ async function exportEnvItems(data, env, envBase) {
     }
   }
 
-  return { copied, errors, manifestItems };
+  return { copied, excluded, errors, manifestItems };
 }
 
 /** Write env.json + manifest.json + backup-summary.json for one environment. */
@@ -248,8 +252,10 @@ async function exportToRoot(rootDir, opts = {}) {
   const identity = opts.identity;
   if (!identity?.uuid) throw new Error("exportToRoot requires a persisted machine identity (opts.identity)");
   const hostMid = machineId();
+  const excludeConfig = opts.excludeConfig;
 
   let copied = 0;
+  let excluded = 0;
   const errors = [];
   const envSummaries = [];
 
@@ -286,8 +292,9 @@ async function exportToRoot(rootDir, opts = {}) {
     await rm(envBase, { recursive: true, force: true });  // clear only THIS machine's env dir
     await mkdir(envBase, { recursive: true });
 
-    const r = await exportEnvItems(data, env, envBase);
+    const r = await exportEnvItems(data, env, envBase, excludeConfig);
     copied += r.copied;
+    excluded += r.excluded;
     for (const e of r.errors) errors.push(`[${env.id}] ${e}`);
     await writeEnvMetadata(envBase, env, data, r.manifestItems, r.copied, r.errors, identity);
     envSummaries.push({ envId: env.id, kind: env.kind, copied: r.copied, errors: r.errors.length, counts: data.counts });
@@ -302,13 +309,14 @@ async function exportToRoot(rootDir, opts = {}) {
     environments: allEnvironments,
     thisRun: environments.map((e) => ({ id: e.id, kind: e.kind, distro: e.distro })),
     copied,
+    excluded,
     errors: errors.length,
     errorDetails: errors.length > 0 ? errors : undefined,
     envSummaries,
   };
   await writeFile(join(rootDir, "backup-summary.json"), JSON.stringify(summary, null, 2) + "\n");
 
-  return { copied, errors, summary, environments };
+  return { copied, excluded, errors, summary, environments };
 }
 
 /**
@@ -317,12 +325,13 @@ async function exportToRoot(rootDir, opts = {}) {
  */
 export async function exportAll(backupDir = BACKUP_DIR, opts = {}) {
   const identity = await persistedMachineIdentity(backupDir, opts);
+  const excludeConfig = await loadExcludeConfig(backupDir);
   const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
   const backupRoot = join(backupDir, `backup-${ts}`);
   await mkdir(backupRoot, { recursive: true });
-  const { copied, errors, summary, environments } =
-    await exportToRoot(backupRoot, { ...opts, identity, machineId: uuid8(identity.uuid) });
-  return { backupRoot, copied, errors, summary, environments };
+  const { copied, excluded, errors, summary, environments } =
+    await exportToRoot(backupRoot, { ...opts, identity, excludeConfig, machineId: uuid8(identity.uuid) });
+  return { backupRoot, copied, excluded, errors, summary, environments };
 }
 
 /**
@@ -333,11 +342,12 @@ export async function exportLatest(backupDir = BACKUP_DIR, opts = {}) {
   // Resolve (or mint, on first run) this machine's stable UUID identity — the
   // envId suffix derives from it, so different machines never share an env dir.
   const identity = await persistedMachineIdentity(backupDir, opts);
+  const excludeConfig = await loadExcludeConfig(backupDir);
   // Do NOT wipe latest/ wholesale — other machines' env dirs live here too.
   // exportToRoot clears only this machine's own env dirs.
   const latestDir = join(backupDir, "latest");
   await mkdir(latestDir, { recursive: true });
-  const { copied, errors, summary, environments } =
-    await exportToRoot(latestDir, { ...opts, identity, machineId: uuid8(identity.uuid) });
-  return { backupRoot: latestDir, copied, errors, summary, environments };
+  const { copied, excluded, errors, summary, environments } =
+    await exportToRoot(latestDir, { ...opts, identity, excludeConfig, machineId: uuid8(identity.uuid) });
+  return { backupRoot: latestDir, copied, excluded, errors, summary, environments };
 }

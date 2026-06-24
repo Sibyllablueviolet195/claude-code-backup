@@ -279,12 +279,13 @@ async function cmdRunLocked() {
     process.exitCode = 1;
     return;
   }
-  const { backupRoot, copied, errors, summary, environments } = exported;
+  const { backupRoot, copied, excluded, errors, summary, environments } = exported;
 
   if (environments && environments.length > 1) {
     log(`Environments: ${environments.map((e) => e.id).join(", ")}`);
   }
   log(`Exported ${copied} items to ${backupRoot}`);
+  if (excluded > 0) log(`Excluded ${excluded} item(s) per exclude.json`);
   if (errors.length > 0) {
     log(`Warnings: ${errors.length} items failed to export`);
     for (const err of errors.slice(0, 5)) log(`  - ${err}`);

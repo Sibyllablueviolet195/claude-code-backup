@@ -260,7 +260,7 @@ This machine:
 - [x] **M1** labels/role in machine-id.json + stamp env.json; show labels everywhere
 - [x] **M3** per-item labels + selective restore filters (only/exclude categories/labels)
 - [x] **M2** sync groups + cross-group leak guard (opt-in; fail-closed once groups declared)
-- [ ] **M4** per-machine exclude.json at export
+- [x] **M4** per-machine exclude.json at export
 - [ ] **UX** new init question script
 - [ ] **UX** status rewrite (scan env dirs, group by label, staleness/unpushed/warnings)
 - [ ] **UX** `list` command
