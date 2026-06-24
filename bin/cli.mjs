@@ -15,6 +15,7 @@ import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { mkdir, readFile, writeFile, access } from "node:fs/promises";
 import { createInterface } from "node:readline";
+import { acquireLock, releaseLock, ensureLocalIgnores, LOCAL_IGNORES } from "../src/runlock.mjs";
 
 const HOME = homedir();
 const BACKUP_DIR = join(HOME, ".claude-backups");
@@ -97,7 +98,11 @@ async function cmdInit() {
   async function writeRepoMeta() {
     await writeFile(
       join(BACKUP_DIR, ".gitignore"),
-      ["# Don't track timestamped backups — only latest/", "backup-*/", "*.log", "config.json", ""].join("\n")
+      [
+        "# Don't track timestamped backups — only latest/", "backup-*/", "*.log", "config.json",
+        "# Per-machine LOCAL state — must never be shared between machines",
+        ...LOCAL_IGNORES, "",
+      ].join("\n")
     );
     // Treat every backed-up file as binary: never normalize line endings, so
     // backups are byte-faithful and restores match the originals exactly.
@@ -218,6 +223,20 @@ async function cmdInit() {
 }
 
 async function cmdRun() {
+  // Serialize runs so a scheduled run and a manual one can't race (C6).
+  if (!(await acquireLock(BACKUP_DIR))) {
+    log("Another backup is already running (lock held) — skipping this run.");
+    process.exitCode = 1;
+    return;
+  }
+  try {
+    await cmdRunLocked();
+  } finally {
+    await releaseLock(BACKUP_DIR);
+  }
+}
+
+async function cmdRunLocked() {
   const { exportLatest } = await import("../src/exporter.mjs");
   const { commitAndPush } = await import("../src/git-sync.mjs");
 
@@ -226,7 +245,18 @@ async function cmdRun() {
   const startStopped = !process.argv.includes("--quiet");
 
   log("Scanning and exporting...");
-  const { backupRoot, copied, errors, summary, environments } = await exportLatest(BACKUP_DIR, { startStopped });
+  let exported;
+  try {
+    exported = await exportLatest(BACKUP_DIR, {
+      startStopped,
+      confirmCollision: process.argv.includes("--confirm-collision"),
+    });
+  } catch (err) {
+    log(`\n✗ Backup aborted: ${err.message}`);
+    process.exitCode = 1;
+    return;
+  }
+  const { backupRoot, copied, errors, summary, environments } = exported;
 
   if (environments && environments.length > 1) {
     log(`Environments: ${environments.map((e) => e.id).join(", ")}`);
@@ -237,10 +267,16 @@ async function cmdRun() {
     for (const err of errors.slice(0, 5)) log(`  - ${err}`);
   }
 
+  // Keep per-machine local state (identity, lock) out of the shared repo.
+  await ensureLocalIgnores(BACKUP_DIR);
+
   // Git commit + push (backups must go to a private repo — see the guard below)
   log("Committing...");
   const result = await commitAndPush(BACKUP_DIR, { allowPublic: process.argv.includes("--allow-public") });
   log(result.message);
+  // A blocked push (public-remote guard or rebase conflict) committed locally but
+  // did NOT reach the remote — exit non-zero so scheduled runs surface it.
+  if (result.blocked) process.exitCode = 1;
 
   // Write last-run info
   await saveConfig({
@@ -264,11 +300,27 @@ async function cmdStatus() {
     log("No backup has been run yet.");
   }
 
-  // Show which environments the last backup captured.
+  // Show every machine/env in the backup, computed ON READ from env dirs (not
+  // the clobberable top-level cache — C6), grouped by machine label.
   try {
-    const idx = JSON.parse(await readFile(join(BACKUP_DIR, "latest", "backup-summary.json"), "utf-8"));
-    if (idx.environments?.length) {
-      log(`  Environments: ${idx.environments.map((e) => e.id).join(", ")}`);
+    const { readBackupIndex } = await import("../src/exporter.mjs");
+    const { environments } = await readBackupIndex(join(BACKUP_DIR, "latest"));
+    if (environments.length) {
+      log("\nMachines in backup:");
+      const byLabel = new Map();
+      for (const e of environments) {
+        const key = e.label || "(unlabeled)";
+        if (!byLabel.has(key)) byLabel.set(key, []);
+        byLabel.get(key).push(e);
+      }
+      for (const [label, envs] of byLabel) {
+        const role = envs[0].role ? ` · role: ${envs[0].role}` : "";
+        log(`  ${label}${role}`);
+        for (const e of envs) {
+          const when = e.lastBackupAt ? new Date(e.lastBackupAt).toISOString().slice(0, 16).replace("T", " ") : "never";
+          log(`    ${e.id}   ${e.copied ?? 0} items   ${when}`);
+        }
+      }
     }
   } catch {}
 
@@ -366,7 +418,8 @@ switch (command) {
     log("  claude-code-backup status      Show backup status");
     log("  claude-code-backup restore     Restore from backup (dry-run; add --apply)");
     log("  claude-code-backup uninstall   Remove scheduled backup\n");
-    log("  restore flags: --apply  --from <envId>  --to <envId>  --scope <id>  --verbose");
+    log("  run flags:     --quiet  --allow-public  --confirm-collision");
+    log("  restore flags: --apply  --from <envId>  --to <envId>  --scope <id>  --force  --verbose");
     log("Backs up Windows-native AND WSL stores; restores across machines and OSes.");
     break;
 }

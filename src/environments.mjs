@@ -8,16 +8,19 @@
  * because Windows-native Claude Code and WSL Claude Code are completely
  * separate installs that never merge and can drift.
  *
- * Pure discovery: this module reads (env vars, /proc, `wsl.exe`, UNC stat) but
- * never scans content and never writes. Its only possible side effect is that
- * probing a stopped WSL distro can auto-start it — gated behind `startStopped`.
+ * Discovery is read-only: it reads (env vars, /proc, `wsl.exe`, UNC stat) but
+ * never scans content. Its only possible side effect is that probing a stopped
+ * WSL distro can auto-start it — gated behind `startStopped`. The one exception
+ * is persistedMachineIdentity(), which writes <backupDir>/machine-id.json once
+ * to mint this machine's stable UUID identity.
  */
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { access, readFile } from "node:fs/promises";
+import { access, readFile, writeFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir, platform, hostname } from "node:os";
+import { randomUUID } from "node:crypto";
 
 const exec = promisify(execFile);
 
@@ -47,6 +50,57 @@ export function machineId() {
     .replace(/[^A-Za-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
     .slice(0, 40) || "machine";
+}
+
+/** First 8 hex of a UUID — the short, stable, machine-unique envId suffix. */
+export function uuid8(uuid) {
+  return String(uuid || "").replace(/-/g, "").slice(0, 8);
+}
+
+/**
+ * Read (or, on first run, create) this machine's persisted identity. This is
+ * the ONE write in this otherwise read-only module — it lives at
+ * `<backupDir>/machine-id.json` and is the source of truth for envId.
+ *
+ * A hostname is NOT unique (two machines named DESKTOP collide), so identity is
+ * a random UUID generated once and never regenerated. The first 8 hex of that
+ * UUID become the envId suffix, so different machines can never share an env dir
+ * and clobber each other's backup.
+ *
+ * @param {string} backupDir  the backup repo root (~/.claude-backups)
+ * @param {{ label?: string, role?: "work"|"home"|"shared" }} [opts]
+ *   label/role are used only when the file is first created (init supplies them);
+ *   defaults are the hostname and "shared" so unattended runs still work.
+ * @returns {Promise<{uuid,label,role,hostname,createdAt}>}
+ */
+export async function persistedMachineIdentity(backupDir, opts = {}) {
+  const file = join(backupDir, "machine-id.json");
+  try {
+    const existing = JSON.parse(await readFile(file, "utf-8"));
+    if (existing && existing.uuid) return existing;   // never auto-regenerate
+  } catch { /* missing or malformed — (re)create below */ }
+
+  const host = hostname() || "machine";
+  const identity = {
+    uuid: randomUUID(),
+    label: opts.label || host,
+    role: opts.role || "shared",
+    hostname: host,
+    createdAt: new Date().toISOString(),
+  };
+  await mkdir(backupDir, { recursive: true });
+  // Exclusive create: if two first-runs race, only one UUID can win. The loser
+  // adopts the winner's file rather than continuing with an orphaned in-memory id.
+  try {
+    await writeFile(file, JSON.stringify(identity, null, 2) + "\n", { flag: "wx" });
+    return identity;
+  } catch (err) {
+    if (err?.code === "EEXIST") {
+      const winner = JSON.parse(await readFile(file, "utf-8"));
+      if (winner?.uuid) return winner;
+    }
+    throw err;
+  }
 }
 
 /** Is THIS process running inside a WSL distro? */

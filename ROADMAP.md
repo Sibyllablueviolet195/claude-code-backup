@@ -250,10 +250,10 @@ This machine:
 ---
 
 ## Task checklist
-- [ ] **C1** persisted UUID identity + collision guard + envId redesign + legacy migration
-- [ ] **C2** rebase-conflict detection/abort in commitAndPush
-- [ ] **C3** case-insensitive insideHome on Windows
-- [ ] **C6** compute summary on read + per-run lockfile
+- [x] **C1** persisted UUID identity + collision guard + envId redesign + legacy migration
+- [x] **C2** rebase-conflict detection/abort in commitAndPush
+- [x] **C3** case-insensitive insideHome on Windows
+- [x] **C6** compute summary on read + per-run lockfile
 - [ ] **C7** MCP merge skip-unless-force (+ count skips)
 - [ ] **C5** secret-scan warning + per-run visibility re-check + exclude hook + README rotate note
 - [ ] **M5** conflict preview via manifest `exportedAt` (abort apply unless --force)

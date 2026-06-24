@@ -5,6 +5,38 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - Unreleased
+
+Foundation + P0 hardening: makes the shared multi-machine repo safe against
+identity collisions, rebase corruption, silent Windows restore failures, and
+concurrent-run races.
+
+### Fixed
+- **Stable per-machine identity — no more silent clobber (C1).** Machine identity
+  was derived from `os.hostname()`, so two machines with the same hostname shared
+  an `envId` and a `run` would `rm -rf` and overwrite the other's backup. Identity
+  is now a random UUID persisted once in `~/.claude-backups/machine-id.json`
+  (never regenerated); `envId` is `<kind>[-<distro>]-<uuid8>`. A **collision
+  guard** refuses to overwrite an env dir owned by a different UUID
+  (`--confirm-collision` to override), and a legacy hostname-based dir is adopted
+  so its git history carries forward. `machine-id.json` is kept **local** and
+  gitignored — it is never pushed to the shared repo.
+- **Rebase conflicts no longer push a broken state (C2).** A real `git pull
+  --rebase` conflict was swallowed and the push proceeded on a mid-rebase
+  worktree while reporting success. Conflicts are now detected, the rebase is
+  aborted to restore a clean tree, and the run reports `rebase-conflict` and
+  exits non-zero without pushing.
+- **Windows restores no longer silently skip every item (C3).** The
+  inside-home safety check was case-sensitive, so `c:\users\…` failed to match
+  `C:\Users\…` and every item was refused as "outside home". The check now
+  case-folds on Windows (POSIX stays case-sensitive); the `..` traversal guard is
+  unchanged.
+- **Concurrent runs can't hide machines or race (C6).** `status`/`restore` now
+  compute the multi-machine index **on read** by scanning each env dir's own
+  metadata, so a clobbered top-level `backup-summary.json` can't hide a machine.
+  A per-run lockfile (`~/.claude-backups/.lock`, with stale/PID-reuse reclaim)
+  serializes a manual run against a scheduled one.
+
 ## [0.4.0] - 2026-06-23
 
 ### Changed

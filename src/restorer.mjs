@@ -14,6 +14,7 @@ import { readFile, writeFile, mkdir, copyFile, cp, access, rename } from "node:f
 import { join, dirname, basename } from "node:path";
 import { homedir } from "node:os";
 import { discoverEnvironments } from "./environments.mjs";
+import { readBackupIndex } from "./exporter.mjs";
 
 const BACKUP_DIR = join(homedir(), ".claude-backups");
 
@@ -108,11 +109,17 @@ function mapItem(item, srcEnv, destEnv) {
   return { skip: true, reason: "outside home (managed/system path)" };
 }
 
-/** Safety: dest must resolve inside the destination HOME. */
-function insideHome(destNative, destEnv) {
+/** Safety: dest must resolve inside the destination HOME. Exported for tests. */
+export function insideHome(destNative, destEnv) {
   const destStyle = styleOf(destEnv.osPlatform);
   if (destNative.includes("..")) return false;
-  return destNative.startsWith(destEnv.home + sepOf(destStyle)) || destNative === destEnv.home;
+  // Windows paths are case-insensitive: a backup's "C:\\Users\\me" must match a
+  // homedir() reporting "c:\\users\\me". Without folding, every item is skipped
+  // as "outside home" and the restore silently does nothing (C3).
+  const fold = destStyle === "win" ? (s) => s.toLowerCase() : (s) => s;
+  const home = fold(destEnv.home);
+  const dest = fold(destNative);
+  return dest.startsWith(home + sepOf(destStyle)) || dest === home;
 }
 
 // ── MCP merge (read-modify-write the host JSON, never clobber) ───────────
@@ -159,16 +166,21 @@ async function backup(p) {
 // ── Source discovery ─────────────────────────────────────────────────────
 
 async function loadSources(latestDir) {
-  const idx = await readJson(join(latestDir, "backup-summary.json"));
-  if (!idx || !idx.environments) {
+  // Compute the index ON READ from env dirs, not the top-level cache, so a
+  // concurrent run that clobbered backup-summary.json can't hide a machine (C6).
+  const { environments } = await readBackupIndex(latestDir);
+  if (!environments.length) {
+    // A pre-v0.5.0 backup has a top-level summary but no per-environment dirs.
+    const legacy = await readJson(join(latestDir, "backup-summary.json"));
     throw new Error(
-      "This backup predates manifest support (no environment index). " +
-      "Run `claude-code-backup run` once to regenerate, then restore."
+      legacy
+        ? "This backup predates the per-environment layout. Run `claude-code-backup run` once to regenerate it, then restore."
+        : "No restorable environments found in backup. Run `claude-code-backup run` once to (re)generate, then restore."
     );
   }
   const sources = [];
-  for (const e of idx.environments) {
-    const dir = idx.multiEnv ? join(latestDir, e.id) : latestDir;
+  for (const e of environments) {
+    const dir = join(latestDir, e.id);
     const manifest = await readJson(join(dir, "manifest.json"));
     const env = await readJson(join(dir, "env.json"));
     if (manifest && env) sources.push({ env, manifest, dir });

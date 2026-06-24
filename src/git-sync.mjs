@@ -9,6 +9,10 @@ import { join, dirname } from "node:path";
 
 const exec = promisify(execFile);
 
+async function pathExists(p) {
+  try { await access(p); return true; } catch { return false; }
+}
+
 function git(args, cwd) {
   // core.longpaths=true  — let Git for Windows handle paths over the 260-char
   //   MAX_PATH limit (deeply-nested plugin skills exceed it, which otherwise
@@ -190,12 +194,40 @@ export async function commitAndPush(dir, opts = {}) {
     }
     // Sync with other machines first: rebase our env-dir commit on top of any
     // changes they pushed. Machines touch disjoint latest/<envId>/ dirs, so this
-    // is conflict-free. Ignored on the first push when origin/main doesn't exist.
-    try { await git(["pull", "--rebase", "origin", "main"], dir); } catch {}
+    // is normally conflict-free, and on the first push origin/main doesn't exist
+    // yet (a benign failure). But a REAL conflict leaves the worktree mid-rebase;
+    // pushing then would commit an inconsistent state and falsely report success.
+    let syncNote = "";
+    try {
+      await git(["pull", "--rebase", "origin", "main"], dir);
+    } catch (err) {
+      const inRebase =
+        (await pathExists(join(dir, ".git", "rebase-merge"))) ||
+        (await pathExists(join(dir, ".git", "rebase-apply")));
+      if (inRebase) {
+        // Abort to restore a clean worktree, then refuse to push.
+        try { await git(["rebase", "--abort"], dir); } catch {}
+        return {
+          committed: true, pushed: false, blocked: "rebase-conflict",
+          message:
+            `Committed, but NOT pushed: rebasing onto origin/main hit a conflict.\n` +
+            `  Another machine pushed overlapping changes. The rebase was aborted to\n` +
+            `  keep your local backup intact. In ${dir} run 'git pull --rebase',\n` +
+            `  resolve the conflict, then re-run the backup.`,
+        };
+      }
+      // No rebase state. Either a benign first push (origin/main doesn't exist
+      // yet) or a real sync failure (network/auth). If a remote-tracking main
+      // exists, the sync genuinely failed — warn rather than swallow silently.
+      let remoteMainExists = false;
+      try { await git(["rev-parse", "--verify", "--quiet", "refs/remotes/origin/main"], dir); remoteMainExists = true; } catch {}
+      if (remoteMainExists) syncNote = " (warning: could not sync with origin before pushing)";
+    }
     try {
       await git(["push", "-u", "origin", "main"], dir);
       let message = `Committed and pushed: ${commitMsg}`;
       if (vis.state === "unknown") message += " (note: could not verify the remote is private)";
+      message += syncNote;
       return { committed: true, pushed: true, message };
     } catch (err) {
       return { committed: true, pushed: false, message: `Committed but push failed: ${err.message}` };
