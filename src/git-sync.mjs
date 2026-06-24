@@ -5,7 +5,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { access } from "node:fs/promises";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 
 const exec = promisify(execFile);
 
@@ -69,6 +69,14 @@ export async function isGitRepo(dir) {
   } catch {
     return false;
   }
+}
+
+/**
+ * Clone an existing backup repo into `dir` (used when a second machine joins an
+ * existing shared backup). `dir` must not already exist or must be empty.
+ */
+export async function cloneRepo(url, dir) {
+  await git(["clone", url, dir], dirname(dir));
 }
 
 /**
@@ -180,6 +188,10 @@ export async function commitAndPush(dir, opts = {}) {
           `  Point origin at a PRIVATE repo, or re-run with --allow-public to override.`,
       };
     }
+    // Sync with other machines first: rebase our env-dir commit on top of any
+    // changes they pushed. Machines touch disjoint latest/<envId>/ dirs, so this
+    // is conflict-free. Ignored on the first push when origin/main doesn't exist.
+    try { await git(["pull", "--rebase", "origin", "main"], dir); } catch {}
     try {
       await git(["push", "-u", "origin", "main"], dir);
       let message = `Committed and pushed: ${commitMsg}`;

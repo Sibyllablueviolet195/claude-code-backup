@@ -59,7 +59,10 @@ async function saveConfig(config) {
 
 async function cmdInit() {
   const { scan } = await import("../src/scanner.mjs");
-  const { isGitRepo, initRepo, addRemote } = await import("../src/git-sync.mjs");
+  const {
+    isGitRepo, initRepo, addRemote, hasRemote, getRemoteUrl, cloneRepo,
+    ghAvailable, ghAuthedUser, ghCreateRepo, getRemoteVisibility,
+  } = await import("../src/git-sync.mjs");
   const { install } = await import("../src/scheduler.mjs");
   const { discoverEnvironments } = await import("../src/environments.mjs");
 
@@ -85,89 +88,100 @@ async function cmdInit() {
   }
   log("");
 
-  // Create backup directory
-  await mkdir(BACKUP_DIR, { recursive: true });
+  // ── Repo + remote setup ──────────────────────────────────────────
+  // One private repo holds EVERY machine, separated by per-environment
+  // folders (latest/<envId>/) whose names embed the hostname. So the repo
+  // itself is machine-agnostic: the first machine CREATES it, and later
+  // machines JOIN by cloning it (sharing history so pushes don't clobber).
 
-  // Git repo setup
-  if (!(await isGitRepo(BACKUP_DIR))) {
-    log("Initializing git repo in ~/.claude-backups/");
-    await initRepo(BACKUP_DIR);
-
-    // Write .gitignore
+  async function writeRepoMeta() {
     await writeFile(
       join(BACKUP_DIR, ".gitignore"),
-      [
-        "# Don't track timestamped backups — only latest/",
-        "backup-*/",
-        "*.log",
-        "config.json",
-        "",
-      ].join("\n")
+      ["# Don't track timestamped backups — only latest/", "backup-*/", "*.log", "config.json", ""].join("\n")
     );
-
     // Treat every backed-up file as binary: never normalize line endings, so
     // backups are byte-faithful and restores match the originals exactly.
-    await writeFile(
-      join(BACKUP_DIR, ".gitattributes"),
-      ["* -text", ""].join("\n")
-    );
+    await writeFile(join(BACKUP_DIR, ".gitattributes"), ["* -text", ""].join("\n"));
   }
 
-  // Remote setup
-  const { hasRemote, getRemoteUrl } = await import("../src/git-sync.mjs");
-  if (await hasRemote(BACKUP_DIR)) {
-    const url = await getRemoteUrl(BACKUP_DIR);
-    log(`Git remote already configured: ${url}`);
-    const change = await ask("Change remote? (y/N): ");
-    if (change.toLowerCase() === "y") {
-      const { execFile } = await import("node:child_process");
-      const { promisify } = await import("node:util");
-      const exec = promisify(execFile);
-      const newUrl = await ask("GitHub repo URL (SSH or HTTPS): ");
-      await exec("git", ["remote", "set-url", "origin", newUrl], { cwd: BACKUP_DIR });
-      log(`Remote updated to: ${newUrl}`);
+  async function warnIfPublic() {
+    const vis = await getRemoteVisibility(BACKUP_DIR);
+    if (vis.state === "public") {
+      log(`⚠️  WARNING: ${vis.slug} is PUBLIC. Backups will be blocked until it's private (or you pass --allow-public).`);
     }
-  } else {
-    const { ghAvailable, ghAuthedUser, ghCreateRepo } = await import("../src/git-sync.mjs");
-    let configured = false;
+  }
 
-    // Offer to create the private repo automatically via the gh CLI (HTTPS).
-    if (await ghAvailable()) {
-      const ghUser = await ghAuthedUser();
-      if (ghUser) {
-        const sanitizedHost = (process.env.COMPUTERNAME || process.env.HOSTNAME || "machine")
-          .replace(/[^A-Za-z0-9]+/g, "-").replace(/^-+|-+$/g, "").toLowerCase() || "machine";
-        const defaultName = `claude-backup-${sanitizedHost}`;
-        const create = await ask(`Create a private GitHub repo with gh (as ${ghUser})? (Y/n): `);
-        if (create.toLowerCase() !== "n") {
-          const nameAns = await ask(`Repo name (default: ${defaultName}): `);
-          const repoName = nameAns || defaultName;
-          try {
-            const url = await ghCreateRepo(repoName);
-            await addRemote(BACKUP_DIR, url);
-            log(`Created and linked: ${url}`);
-            configured = true;
-          } catch (err) {
-            log(`gh repo create failed (${err.message}). Falling back to manual setup.`);
+  if ((await isGitRepo(BACKUP_DIR)) && (await hasRemote(BACKUP_DIR))) {
+    log(`Existing backup repo: ${await getRemoteUrl(BACKUP_DIR)}`);
+    await warnIfPublic();
+  } else {
+    log("Set up the backup repo (one private repo holds every machine):");
+    log("  [1] First machine  — create a new private repo");
+    log("  [2] Join existing  — clone the repo another machine already uses");
+    const mode = (await ask("Choose 1 or 2 (default 1): ")).trim();
+
+    if (mode === "2") {
+      // JOIN — clone so we share history and only manage our own env dirs.
+      let url = await ask("Existing backup repo URL (SSH or HTTPS): ");
+      if (!url && (await ghAvailable())) {
+        const u = await ghAuthedUser();
+        if (u) {
+          const guess = `https://github.com/${u}/claude-backup.git`;
+          if ((await ask(`Use ${guess}? (Y/n): `)).toLowerCase() !== "n") url = guess;
+        }
+      }
+      if (!url) { log("No repo URL given — aborting. Re-run init when ready."); return; }
+      if (await exists(BACKUP_DIR)) {
+        log("~/.claude-backups already exists, so it can't be cloned into. Move/remove it and re-run init.");
+        return;
+      }
+      try {
+        await cloneRepo(url, BACKUP_DIR);
+        log("Cloned existing backup into ~/.claude-backups/");
+      } catch (err) {
+        log(`Clone failed: ${err.message}`);
+        return;
+      }
+      await warnIfPublic();
+    } else {
+      // CREATE — new repo for the first machine.
+      await mkdir(BACKUP_DIR, { recursive: true });
+      if (!(await isGitRepo(BACKUP_DIR))) {
+        log("Initializing git repo in ~/.claude-backups/");
+        await initRepo(BACKUP_DIR);
+        await writeRepoMeta();
+      }
+
+      let configured = false;
+      if (await ghAvailable()) {
+        const ghUser = await ghAuthedUser();
+        if (ghUser) {
+          const create = await ask(`Create a private GitHub repo with gh (as ${ghUser})? (Y/n): `);
+          if (create.toLowerCase() !== "n") {
+            const nameAns = await ask("Repo name (default: claude-backup): ");
+            const repoName = nameAns || "claude-backup";
+            try {
+              const url = await ghCreateRepo(repoName);
+              await addRemote(BACKUP_DIR, url);
+              log(`Created and linked: ${url}`);
+              configured = true;
+            } catch (err) {
+              log(`gh repo create failed (${err.message}). Falling back to manual setup.`);
+            }
           }
         }
       }
-    }
 
-    if (!configured) {
-      log("Use a PRIVATE repo — backups can contain secrets (MCP keys, settings.local.json, sessions).");
-      const repoUrl = await ask("GitHub repo URL (e.g. git@github.com:you/claude-backup.git): ");
-      if (repoUrl) {
-        await addRemote(BACKUP_DIR, repoUrl);
-        log(`Remote added: ${repoUrl}`);
-        // Warn immediately if we can tell the repo is public.
-        const { getRemoteVisibility } = await import("../src/git-sync.mjs");
-        const vis = await getRemoteVisibility(BACKUP_DIR);
-        if (vis.state === "public") {
-          log(`⚠️  WARNING: ${vis.slug} is PUBLIC. Backups will be blocked until you switch to a private repo (or use --allow-public).`);
+      if (!configured) {
+        log("Use a PRIVATE repo — backups can contain secrets (MCP keys, settings.local.json, sessions).");
+        const repoUrl = await ask("GitHub repo URL (e.g. git@github.com:you/claude-backup.git): ");
+        if (repoUrl) {
+          await addRemote(BACKUP_DIR, repoUrl);
+          log(`Remote added: ${repoUrl}`);
+          await warnIfPublic();
+        } else {
+          log("Skipping remote setup. Run 'git remote add origin <url>' in ~/.claude-backups/ later.");
         }
-      } else {
-        log("Skipping remote setup. Run 'git remote add origin <url>' in ~/.claude-backups/ later.");
       }
     }
   }

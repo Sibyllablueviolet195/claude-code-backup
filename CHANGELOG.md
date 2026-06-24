@@ -5,6 +5,27 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-06-23
+
+### Changed
+- **One private repo now safely holds multiple machines.** Backups always use
+  the per-environment layout `latest/<envId>/…` (the `envId` embeds the
+  hostname), and a `run` only clears and rewrites *this* machine's own env
+  dirs — other machines' backups in the shared repo are left untouched.
+  Previously `run` wiped all of `latest/`, so a second machine would clobber
+  the first. The top-level `backup-summary.json` is rebuilt from every env dir
+  present, so `restore` and `status` see all machines.
+- **`init` no longer appends the hostname to the repo name** (default is now
+  `claude-backup`). Per-machine separation happens via the env folders inside
+  the one repo, not via separate repos.
+
+### Added
+- **`init` asks first-machine (create) vs join-existing (clone).** Joining a
+  backup now **clones** the shared repo into `~/.claude-backups/` so the new
+  machine shares history and pushes fast-forward instead of clobbering.
+- **`run` does `git pull --rebase` before pushing**, so machines backing up to
+  the same repo merge cleanly (they touch disjoint env dirs).
+
 ## [0.3.1] - 2026-06-23
 
 ### Added

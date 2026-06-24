@@ -37,8 +37,23 @@ latest/wsl-Ubuntu-DESKTOP/…   ← WSL Ubuntu store
 
 Interactive runs (`init`, `run`) wake a stopped distro briefly to back it up;
 scheduled background runs leave stopped distros asleep and capture WSL only when
-it's already running. On Linux/macOS (or inside WSL) there's a single environment
-and the layout stays flat (`latest/global/…`).
+it's already running.
+
+## One repo, many machines
+
+A single private repo holds **every machine you back up** — each environment
+lives under its own `latest/<envId>/` folder (the `envId` embeds the hostname),
+so machines never collide:
+
+```
+latest/win-DESKTOP/…            ← machine 1, Windows store
+latest/wsl-Ubuntu-DESKTOP/…     ← machine 1, WSL store
+latest/mac-seans-mbp/…          ← machine 2, macOS store
+```
+
+The **first machine** creates the repo; **later machines join** by cloning it,
+and each `run` only rewrites its own env folders (and `git pull --rebase`es
+before pushing), so machines never overwrite each other's backups.
 
 ## Quick start
 
@@ -48,7 +63,7 @@ npx @seangsisg/claude-code-backup init
 
 This will:
 1. Discover your environments (Windows-native + any WSL distros) and show what it found
-2. Create a private GitHub repo for you (if the [`gh` CLI](https://cli.github.com/) is installed and authenticated) — otherwise ask for a repo URL
+2. Ask whether this is your **first machine** (creates a private repo — via the [`gh` CLI](https://cli.github.com/) if available, else asks for a URL) or **joining an existing backup** (clones the repo another machine already uses)
 3. Ask your preferred backup interval (default: every 4 hours)
 4. Install a scheduled job — systemd timer (Linux), LaunchAgent (macOS), or Task Scheduler task (Windows)
 5. Run the first backup immediately
@@ -98,11 +113,12 @@ This only removes the scheduled task. Your backup data stays in `~/.claude-backu
 └── backup.log
 ```
 
-When there's only one environment the per-env dir is omitted and scopes sit
-directly under `latest/` (e.g. `latest/global/…`). Each backup overwrites
-`latest/` so git only tracks the diff, not full copies. Your git history is your
-version history. Files are committed byte-for-byte (`core.autocrlf=false` +
-`.gitattributes`), so restores match the originals exactly on every platform.
+Every backup uses the per-environment layout (`latest/<envId>/…`), even on a
+single machine, so machines can share one repo without colliding. Each `run`
+rewrites only its own env folders, so git tracks just the diff — your git
+history is your version history. Files are committed byte-for-byte
+(`core.autocrlf=false` + `.gitattributes`), so restores match the originals
+exactly on every platform.
 
 > On Windows, `~/.claude-backups/` resolves to `%USERPROFILE%\.claude-backups`.
 

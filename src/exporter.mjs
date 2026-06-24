@@ -13,7 +13,7 @@
  * their real locations on any machine, including cross-OS.
  */
 
-import { mkdir, copyFile, writeFile, cp, rm } from "node:fs/promises";
+import { mkdir, copyFile, writeFile, cp, rm, readdir, readFile } from "node:fs/promises";
 import { join, basename, dirname } from "node:path";
 import { homedir } from "node:os";
 import { scan } from "./scanner.mjs";
@@ -136,14 +136,36 @@ async function writeEnvMetadata(envBase, env, data, manifestItems, copied, error
   return summary;
 }
 
+/** Enumerate every environment dir already present under rootDir (all machines). */
+async function readEnvDirs(rootDir) {
+  const out = [];
+  let entries;
+  try { entries = await readdir(rootDir, { withFileTypes: true }); } catch { return out; }
+  for (const e of entries) {
+    if (!e.isDirectory()) continue;
+    try {
+      const ej = JSON.parse(await readFile(join(rootDir, e.name, "env.json"), "utf-8"));
+      out.push({ id: ej.id, kind: ej.kind, distro: ej.distro });
+    } catch { /* not an env dir */ }
+  }
+  return out;
+}
+
 /**
- * Core export routine: discover environments, scan each, copy + write metadata.
- * @param {string} rootDir   directory that receives the per-env (or flat) tree
+ * Core export routine: discover this machine's environments, scan each, and
+ * write them under latest/<envId>/.
+ *
+ * Backups from multiple machines share ONE repo, separated by envId (which
+ * embeds the hostname). So this run only ever clears and rewrites THIS
+ * machine's own env dirs — other machines' backups under rootDir are left
+ * untouched. The top-level index is then rebuilt from every env dir present,
+ * so `restore`/status see all machines.
+ *
+ * @param {string} rootDir   directory that receives the per-env tree
  * @param {object} opts      { startStopped }
  */
 async function exportToRoot(rootDir, opts = {}) {
   const environments = await discoverEnvironments({ startStopped: opts.startStopped });
-  const multiEnv = environments.length > 1;
 
   let copied = 0;
   const errors = [];
@@ -151,21 +173,25 @@ async function exportToRoot(rootDir, opts = {}) {
 
   for (const env of environments) {
     const data = await scan(env);                 // sequential — avoids UNC/local 9p contention
-    const envBase = multiEnv ? join(rootDir, env.id) : rootDir;
+    const envBase = join(rootDir, env.id);        // always per-env, so machines never collide
+    await rm(envBase, { recursive: true, force: true });  // clear only THIS machine's env dir
     await mkdir(envBase, { recursive: true });
 
     const r = await exportEnvItems(data, env, envBase);
     copied += r.copied;
     for (const e of r.errors) errors.push(`[${env.id}] ${e}`);
-    const summary = await writeEnvMetadata(envBase, env, data, r.manifestItems, r.copied, r.errors);
+    await writeEnvMetadata(envBase, env, data, r.manifestItems, r.copied, r.errors);
     envSummaries.push({ envId: env.id, kind: env.kind, copied: r.copied, errors: r.errors.length, counts: data.counts });
   }
 
-  // Top-level index so status/tooling sees the whole picture at a glance.
+  // Rebuild the top-level index from ALL env dirs present (every machine),
+  // not just the ones this run touched.
+  const allEnvironments = await readEnvDirs(rootDir);
   const summary = {
     exportedAt: new Date().toISOString(),
-    multiEnv,
-    environments: environments.map((e) => ({ id: e.id, kind: e.kind, distro: e.distro })),
+    multiEnv: true,                               // layout is always per-env prefixed
+    environments: allEnvironments,
+    thisRun: environments.map((e) => ({ id: e.id, kind: e.kind, distro: e.distro })),
     copied,
     errors: errors.length,
     errorDetails: errors.length > 0 ? errors : undefined,
@@ -193,8 +219,9 @@ export async function exportAll(backupDir = BACKUP_DIR, opts = {}) {
  * previous export so git only stores the diff.
  */
 export async function exportLatest(backupDir = BACKUP_DIR, opts = {}) {
+  // Do NOT wipe latest/ wholesale — other machines' env dirs live here too.
+  // exportToRoot clears only this machine's own env dirs.
   const latestDir = join(backupDir, "latest");
-  try { await rm(latestDir, { recursive: true, force: true }); } catch {}
   await mkdir(latestDir, { recursive: true });
   const { copied, errors, summary, environments } = await exportToRoot(latestDir, opts);
   return { backupRoot: latestDir, copied, errors, summary, environments };
