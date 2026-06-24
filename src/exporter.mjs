@@ -40,6 +40,21 @@ function isExportable(item) {
   return item.category !== "setting" && item.category !== "hook";
 }
 
+/**
+ * M3: labels for selective restore. MCP configs and settings.local.json carry
+ * secrets ("sensitive"); project-scoped items get their scope name so a user can
+ * restore or exclude a single project's data.
+ */
+export function itemLabels(category, scopeId, relName) {
+  const labels = [];
+  // Secret-bearing items: MCP configs (keys in command/args/env), settings.local.json,
+  // and session transcripts (full conversation history, may contain typed secrets).
+  if (category === "mcp" || category === "session") labels.push("sensitive");
+  if ((relName || "").toLowerCase() === "settings.local.json") labels.push("sensitive");
+  if (scopeId && scopeId !== "global") labels.push(scopeId);
+  return labels;
+}
+
 async function pathExists(p) {
   try { await access(p); return true; } catch { return false; }
 }
@@ -109,6 +124,9 @@ async function exportEnvItems(data, env, envBase) {
         continue;
       }
 
+      // M3: tag each item with labels for selective restore.
+      const labels = itemLabels(item.category, item.scopeId, relName);
+
       const entry = {
         backupPath: [item.scopeId, item.category, relName].join("/"),
         originalPath: toNativePath(item.path, env),
@@ -117,6 +135,7 @@ async function exportEnvItems(data, env, envBase) {
         isDir,
         exportedAt,
       };
+      if (labels.length) entry.labels = labels;
       if (repoRootByScope.has(item.scopeId)) entry.repoRoot = repoRootByScope.get(item.scopeId);
       if (item.category === "mcp") {
         entry.mcpServerName = item.name;

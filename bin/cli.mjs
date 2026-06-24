@@ -400,6 +400,12 @@ function argValue(flag) {
   return i !== -1 && process.argv[i + 1] ? process.argv[i + 1] : null;
 }
 
+/** Read a comma-separated list flag (e.g. --exclude-categories mcp,session) or null. */
+function argList(flag) {
+  const v = argValue(flag);
+  return v ? v.split(",").map((s) => s.trim()).filter(Boolean) : null;
+}
+
 async function cmdRestore() {
   const { restore } = await import("../src/restorer.mjs");
   const apply = process.argv.includes("--apply");
@@ -408,6 +414,10 @@ async function cmdRestore() {
     from: argValue("--from"),
     to: argValue("--to"),
     scope: argValue("--scope"),
+    onlyCategories: argList("--only-categories"),
+    excludeCategories: argList("--exclude-categories"),
+    includeLabels: argList("--include-labels"),
+    excludeLabels: argList("--exclude-labels"),
     force: process.argv.includes("--force"),
     verbose: process.argv.includes("--verbose"),
     log,
@@ -476,6 +486,8 @@ switch (command) {
     log("  claude-code-backup uninstall   Remove scheduled backup\n");
     log("  run flags:     --quiet  --allow-public  --confirm-collision");
     log("  restore flags: --apply  --from <envId>  --to <envId>  --scope <id>  --force  --verbose");
+    log("    selective:   --only-categories a,b  --exclude-categories a,b");
+    log("                 --include-labels x,y   --exclude-labels x,y   (e.g. --exclude-labels sensitive)");
     log("Backs up Windows-native AND WSL stores; restores across machines and OSes.");
     break;
 }

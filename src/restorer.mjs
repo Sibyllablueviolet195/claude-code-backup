@@ -238,6 +238,25 @@ async function loadSources(latestDir) {
   return sources;
 }
 
+/**
+ * M3: apply --scope and the category/label filters to a manifest's items.
+ * `onlyCategories`/`includeLabels` are allow-lists; `excludeCategories`/
+ * `excludeLabels` are deny-lists (deny wins).
+ */
+export function selectItems(items, opts) {
+  const only = opts.onlyCategories, exCat = opts.excludeCategories;
+  const incL = opts.includeLabels, exL = opts.excludeLabels;
+  return items.filter((i) => {
+    if (opts.scope && i.scopeId !== opts.scope) return false;
+    if (only?.length && !only.includes(i.category)) return false;
+    if (exCat?.length && exCat.includes(i.category)) return false;
+    const labels = i.labels || [];
+    if (incL?.length && !incL.some((l) => labels.includes(l))) return false;
+    if (exL?.length && exL.some((l) => labels.includes(l))) return false;
+    return true;
+  });
+}
+
 /** Pick the destination environment for a given source env. */
 function pickDest(srcEnv, destEnvs, opts) {
   if (opts.to) {
@@ -285,8 +304,7 @@ export async function restore(backupDir = BACKUP_DIR, opts = {}) {
   // excluded (they go through the C7 merge/skip path, not a blind overwrite).
   for (const src of chosen) {
     const dest = pickDest(src.env, destEnvs, opts);
-    let items = src.manifest.items;
-    if (opts.scope) items = items.filter((i) => i.scopeId === opts.scope);
+    const items = selectItems(src.manifest.items, opts);
     for (const item of items) {
       if (item.category === "mcp" || !item.exportedAt) continue;
       const m = mapItem(item, src.env, dest);
@@ -315,8 +333,7 @@ export async function restore(backupDir = BACKUP_DIR, opts = {}) {
     result.pairs.push({ from: src.env.id, to: dest.id, cross: src.env.osPlatform !== dest.osPlatform });
     log(`\n${src.env.id}  →  ${dest.id}${src.env.osPlatform !== dest.osPlatform ? "   (cross-OS)" : ""}`);
 
-    let items = src.manifest.items;
-    if (opts.scope) items = items.filter((i) => i.scopeId === opts.scope);
+    const items = selectItems(src.manifest.items, opts);
 
     for (const item of items) {
       const m = mapItem(item, src.env, dest);
