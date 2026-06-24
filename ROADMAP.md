@@ -259,7 +259,7 @@ This machine:
 - [x] **M5** conflict preview via manifest `exportedAt` (abort apply unless --force)
 - [x] **M1** labels/role in machine-id.json + stamp env.json; show labels everywhere
 - [x] **M3** per-item labels + selective restore filters (only/exclude categories/labels)
-- [ ] **M2** sync groups + cross-group leak guard
+- [x] **M2** sync groups + cross-group leak guard (opt-in; fail-closed once groups declared)
 - [ ] **M4** per-machine exclude.json at export
 - [ ] **UX** new init question script
 - [ ] **UX** status rewrite (scan env dirs, group by label, staleness/unpushed/warnings)

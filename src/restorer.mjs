@@ -15,6 +15,7 @@ import { join, dirname, basename } from "node:path";
 import { homedir } from "node:os";
 import { discoverEnvironments } from "./environments.mjs";
 import { readBackupIndex } from "./exporter.mjs";
+import { loadSyncConfig, localMachineUuid, restoreAllowed } from "./sync-config.mjs";
 
 const BACKUP_DIR = join(homedir(), ".claude-backups");
 
@@ -243,6 +244,18 @@ async function loadSources(latestDir) {
  * `onlyCategories`/`includeLabels` are allow-lists; `excludeCategories`/
  * `excludeLabels` are deny-lists (deny wins).
  */
+/** Merge a sync group's exclude (categories/labels) into the restore opts (M2). */
+function withGroupExclude(opts, exclude) {
+  if (!exclude) return opts;
+  const cats = Array.isArray(exclude.categories) ? exclude.categories : [];
+  const labs = Array.isArray(exclude.labels) ? exclude.labels : [];
+  return {
+    ...opts,
+    excludeCategories: [...(opts.excludeCategories || []), ...cats],
+    excludeLabels: [...(opts.excludeLabels || []), ...labs],
+  };
+}
+
 export function selectItems(items, opts) {
   const only = opts.onlyCategories, exCat = opts.excludeCategories;
   const incL = opts.includeLabels, exL = opts.excludeLabels;
@@ -295,7 +308,27 @@ export async function restore(backupDir = BACKUP_DIR, opts = {}) {
     log(`Backup contains ${sources.length} environments: ${sources.map((s) => s.env.id).join(", ")}`);
   }
 
-  const result = { applied: !!opts.apply, restored: 0, merged: 0, skipped: 0, errors: [], pairs: [], conflicts: [] };
+  const result = { applied: !!opts.apply, restored: 0, merged: 0, skipped: 0, errors: [], pairs: [], conflicts: [], refused: [] };
+
+  // M2 leak guard (opt-in): with sync groups configured, refuse to restore a
+  // DIFFERENT machine's backup onto this one unless they share a group. Off when
+  // no groups exist, so the common new-machine restore still works. Allowed
+  // sources carry their group's exclude (categories/labels) into selectItems.
+  const syncConfig = await loadSyncConfig(backupDir);
+  const destUuid = await localMachineUuid(backupDir);
+  const allowedSrcs = [];
+  for (const src of chosen) {
+    const verdict = restoreAllowed(src.env.uuid, destUuid, syncConfig);
+    if (!verdict.allowed) {
+      result.refused.push(src.env.id);
+      result.errors.push(`refused (leak guard): ${src.env.id} — ${verdict.reason}. Add a sync group to allow it.`);
+      log(`\n⚠ Skipping ${src.env.id}: ${verdict.reason} (sync-group leak guard).`);
+      continue;
+    }
+    src._opts = withGroupExclude(opts, verdict.exclude);
+    allowedSrcs.push(src);
+  }
+  chosen = allowedSrcs;
 
   // M5: scan for destinations that changed locally SINCE this backup (dest mtime
   // newer than the item's exportedAt) — restoring would overwrite newer edits.
@@ -304,7 +337,7 @@ export async function restore(backupDir = BACKUP_DIR, opts = {}) {
   // excluded (they go through the C7 merge/skip path, not a blind overwrite).
   for (const src of chosen) {
     const dest = pickDest(src.env, destEnvs, opts);
-    const items = selectItems(src.manifest.items, opts);
+    const items = selectItems(src.manifest.items, src._opts || opts);
     for (const item of items) {
       if (item.category === "mcp" || !item.exportedAt) continue;
       const m = mapItem(item, src.env, dest);
@@ -333,7 +366,7 @@ export async function restore(backupDir = BACKUP_DIR, opts = {}) {
     result.pairs.push({ from: src.env.id, to: dest.id, cross: src.env.osPlatform !== dest.osPlatform });
     log(`\n${src.env.id}  →  ${dest.id}${src.env.osPlatform !== dest.osPlatform ? "   (cross-OS)" : ""}`);
 
-    const items = selectItems(src.manifest.items, opts);
+    const items = selectItems(src.manifest.items, src._opts || opts);
 
     for (const item of items) {
       const m = mapItem(item, src.env, dest);

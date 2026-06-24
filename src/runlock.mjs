@@ -12,7 +12,7 @@
 import { mkdir, readFile, writeFile, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 
-export const LOCAL_IGNORES = ["machine-id.json", ".lock"];
+export const LOCAL_IGNORES = ["machine-id.json", "sync-config.json", ".lock"];
 
 // A backup run finishes in well under this; any lock older than it is stale.
 // This bounds the worst case (a crashed run whose PID was recycled — common on
