@@ -267,6 +267,17 @@ async function cmdRunLocked() {
     for (const err of errors.slice(0, 5)) log(`  - ${err}`);
   }
 
+  // C5: heuristic secret scan over THIS run's exported data — a non-blocking
+  // private-repo reminder. The backup intentionally keeps secrets; we never drop
+  // them, we just remind the user to keep the remote private and rotate leaks.
+  try {
+    const { scanForSecrets, secretWarning } = await import("../src/secret-scan.mjs");
+    const dirs = (environments || []).map((e) => join(backupRoot, e.id));
+    const { hits } = await scanForSecrets(dirs);
+    const warning = secretWarning(hits);
+    if (warning) log(warning);
+  } catch {}
+
   // Keep per-machine local state (identity, lock) out of the shared repo.
   await ensureLocalIgnores(BACKUP_DIR);
 
@@ -329,11 +340,23 @@ async function cmdStatus() {
   log(s);
 
   // Check git status
-  const { isGitRepo, hasRemote, getRemoteUrl } = await import("../src/git-sync.mjs");
+  const { isGitRepo, hasRemote, getRemoteUrl, getRemoteVisibility } = await import("../src/git-sync.mjs");
   if (await isGitRepo(BACKUP_DIR)) {
     log("\nGit repo: ~/.claude-backups/");
     if (await hasRemote(BACKUP_DIR)) {
       log(`Remote: ${await getRemoteUrl(BACKUP_DIR)}`);
+      // C5: re-verify visibility on every status — a repo can be flipped public
+      // after init, and the backup contains secrets.
+      const vis = await getRemoteVisibility(BACKUP_DIR);
+      const tag = vis.state === "private" ? "private ✓"
+        : vis.state === "public" ? "PUBLIC ⚠"
+        : "unknown (not a verifiable GitHub remote)";
+      log(`  Visibility: ${tag}`);
+      if (vis.state === "public") {
+        log("  ⚠ Backups are BLOCKED until this repo is private (or you pass --allow-public).");
+      } else if (vis.state === "unknown") {
+        log("  Treat this as untrusted — ensure the remote is private; the backup holds secrets.");
+      }
     } else {
       log("Remote: not configured");
     }

@@ -42,18 +42,39 @@ it's already running.
 ## One repo, many machines
 
 A single private repo holds **every machine you back up** — each environment
-lives under its own `latest/<envId>/` folder (the `envId` embeds the hostname),
-so machines never collide:
+lives under its own `latest/<envId>/` folder, where `envId` is
+`<kind>[-<distro>]-<uuid8>` (the first 8 hex of a per-machine UUID stored locally
+in `~/.claude-backups/machine-id.json`, never committed), so machines with the
+same hostname never collide:
 
 ```
-latest/win-DESKTOP/…            ← machine 1, Windows store
-latest/wsl-Ubuntu-DESKTOP/…     ← machine 1, WSL store
-latest/mac-seans-mbp/…          ← machine 2, macOS store
+latest/win-550e8400/…           ← machine 1, Windows store
+latest/wsl-Ubuntu-550e8400/…    ← machine 1, WSL store
+latest/mac-a1b2c3d4/…           ← machine 2, macOS store
 ```
 
 The **first machine** creates the repo; **later machines join** by cloning it,
 and each `run` only rewrites its own env folders (and `git pull --rebase`es
-before pushing), so machines never overwrite each other's backups.
+before pushing), so machines never overwrite each other's backups. If a run
+would overwrite an env dir owned by a different machine's UUID, it aborts rather
+than clobber it (`--confirm-collision` to override).
+
+## Security & secrets
+
+This backup is intentionally **complete and restorable**, so it keeps real
+secrets — MCP server keys (command/args/env), `settings.local.json`, `.claude.json`,
+and session transcripts. Nothing is silently dropped. Therefore:
+
+- **Always use a PRIVATE repo.** Pushing to a public GitHub remote is **blocked**
+  unless you pass `--allow-public`. `status` re-checks and reports the remote's
+  visibility every time; a non-GitHub remote can't be verified, so it's treated
+  as **unknown** and you should confirm it's private yourself.
+- Each `run` does a quick **secret scan** of what it just backed up and prints a
+  one-line reminder if anything looks like a key/token — a nudge to keep the
+  repo private, not a blocker.
+- **If your backup repo was ever exposed** (public, or a leaked clone), rotate
+  the affected credentials: regenerate MCP server API keys/tokens, and rotate any
+  tokens stored in `settings.local.json` / `.claude.json`.
 
 ## Quick start
 
