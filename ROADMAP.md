@@ -271,4 +271,4 @@ This machine:
 - [ ] **C8** project-encodings.json index
 - [ ] **C10** symlink-aware skill backup/restore
 - [ ] **QoL** `run --dry-run`, `relabel`, progress output, consistent prompt parsing, --help docs
-- [ ] Bump version, update CHANGELOG + README, republish
+- [x] Bump version, update CHANGELOG + README, republish

@@ -101,12 +101,15 @@ When restoring, you can also filter per run: `--exclude-labels sensitive`
 npx @seangsisg/claude-code-backup init
 ```
 
-This will:
+This walks a guided script:
 1. Discover your environments (Windows-native + any WSL distros) and show what it found
-2. Ask whether this is your **first machine** (creates a private repo — via the [`gh` CLI](https://cli.github.com/) if available, else asks for a URL) or **joining an existing backup** (clones the repo another machine already uses)
-3. Ask your preferred backup interval (default: every 4 hours)
-4. Install a scheduled job — systemd timer (Linux), LaunchAgent (macOS), or Task Scheduler task (Windows)
-5. Run the first backup immediately
+2. Ask this machine's **label** and **role** (work/home/shared) — shown wherever machines are listed
+3. On Windows, ask **which WSL distros** to back up (default: all; the choice is honored by every later run)
+4. Ask whether this is your **first machine** (creates a private repo — via the [`gh` CLI](https://cli.github.com/) if available, else asks for a URL) or **joining an existing backup** (clones the repo another machine already uses)
+5. Confirm a **private-repo acknowledgment** when the remote is public or its visibility can't be verified (backups hold secrets)
+6. Ask your backup interval from a menu (1h / 4h / 8h / 24h / manual)
+7. Install or update a scheduled job — systemd timer (Linux), LaunchAgent (macOS), or Task Scheduler task (Windows) — unless you chose manual
+8. Offer to run the first backup immediately
 
 ## Manual backup
 
@@ -117,7 +120,15 @@ npx @seangsisg/claude-code-backup run
 ## Check status
 
 ```bash
-npx @seangsisg/claude-code-backup status
+npx @seangsisg/claude-code-backup status            # single-screen: remote, branch sync, machines, warnings
+npx @seangsisg/claude-code-backup status --verbose  # also prints the raw scheduler output
+```
+
+## List machines & diagnose
+
+```bash
+npx @seangsisg/claude-code-backup list      # every machine/env in the backup, with counts + last-backup age
+npx @seangsisg/claude-code-backup doctor    # health check: repo, remote visibility, scheduler, freshness, index
 ```
 
 ## Remove scheduler
@@ -166,8 +177,9 @@ exactly on every platform.
 
 ```bash
 git clone <your-backup-repo> ~/.claude-backups   # on the new machine
-npx @seangsisg/claude-code-backup restore           # dry-run: shows exactly what would be written
-npx @seangsisg/claude-code-backup restore --apply   # perform the restore
+npx @seangsisg/claude-code-backup restore             # dry-run: shows exactly what would be written
+npx @seangsisg/claude-code-backup restore --apply     # perform the restore
+npx @seangsisg/claude-code-backup restore --interactive  # guided: pick source → dest → preview → confirm
 ```
 
 Restore reads each environment's `manifest.json` and maps every file back to its

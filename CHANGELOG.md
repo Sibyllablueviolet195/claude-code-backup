@@ -5,13 +5,32 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.5.0] - Unreleased
+## [0.5.0] - 2026-06-23
 
 P0 hardening + P1 safety: makes the shared multi-machine repo safe against
 identity collisions, rebase corruption, silent Windows restore failures, and
 concurrent-run races — and stops restore from silently clobbering local config.
+Plus a reworked CLI/UX layer for seeing and operating the multi-machine backup.
 
 ### Added
+- **CLI/UX layer.** New `list` (machines/envs grouped by machine, with item
+  counts and last-backup age) and `doctor` (health check of repo, remote
+  visibility, scheduler, freshness, and backup-index integrity, each with a
+  remediation hint; exits non-zero only on real failures). `status` is rewritten
+  into a single-screen view: remote + verified visibility, branch ahead/behind +
+  uncommitted count, machines with sizes and `⚠ stale` markers (older than 2× the
+  interval), this-machine scheduler/last-run, and a collected warnings section
+  (`status --verbose` shows the raw scheduler output). `restore --interactive`
+  walks pick-source → pick-dest → dry-run preview → explicit confirm, with the M5
+  conflict gate surfaced inline; a declined or EOF'd prompt writes nothing.
+  `init` is rewritten to a guided script: scan summary, machine label/role,
+  WSL-distro selection, first-machine-vs-join, a private-repo acknowledgment gate
+  (shown always; blocks only when the remote is public or its visibility can't be
+  verified), an interval menu (incl. a no-scheduler "manual" mode), an idempotent
+  scheduler install/update, and a run-first-backup prompt.
+- **Per-machine WSL distro allowlist.** `init` asks which WSL distros to back up;
+  the choice is stored locally (`config.json`) and honored by every scheduled and
+  manual `run`. Existing setups are unaffected (no selection = all distros).
 - **Multi-machine model (M1–M4).** Machines now carry a human **label** and
   **role** (work/home/shared), prompted at `init` and shown wherever machines are
   listed. **Selective restore** filters: `--only-categories` /
