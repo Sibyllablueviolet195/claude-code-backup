@@ -5,6 +5,9 @@ node_modules/
 .claude/
 *.log
 
+# Handoff docs contain machine/personal details — keep local, never publish
+docs/HANDOFF-*.md
+
 # OS / editor cruft
 .DS_Store
 Thumbs.db
