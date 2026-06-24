@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/seanGSISG/claude-code-backup/main/.media/image.png" alt="Claude Code Backup — back up and transport your Claude settings across Windows, WSL, Linux & macOS" width="640">
+</p>
+
 # Claude Code Backup
 
 Automatic backup of all your Claude Code settings to GitHub. One command to set up, then it runs on boot/logon and every few hours. Works on **Linux, macOS, and Windows 11**.
