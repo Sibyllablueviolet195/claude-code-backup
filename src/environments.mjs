@@ -272,14 +272,22 @@ let _cache = null;
  *   startStopped — probe stopped WSL distros too (auto-starts them). Default false.
  */
 export async function discoverEnvironments(opts = {}) {
-  if (_cache && !opts.machineId) return _cache;
+  // Don't serve a cached (unfiltered) result when a distro allowlist is in play.
+  if (_cache && !opts.machineId && !opts.onlyDistros) return _cache;
   const mid = opts.machineId || machineId();
   const envs = [nativeEnvironment({ machineId: mid })];
 
   // WSL-crossing is gated strictly to a Windows host. A process inside WSL,
   // or on native Linux/macOS, reports only itself.
   if (platform() === "win32") {
-    const all = await listWslDistros();
+    let all = await listWslDistros();
+    // Optional per-machine allowlist (init's "which distros?" choice): an array
+    // restricts to those names (case-insensitive); [] means no WSL; undefined =
+    // all (the default, unchanged behavior).
+    if (Array.isArray(opts.onlyDistros)) {
+      const allow = new Set(opts.onlyDistros.map((d) => d.toLowerCase()));
+      all = all.filter((d) => allow.has(d.toLowerCase()));
+    }
     // Stopped distros are probed (and thereby auto-started) only when allowed —
     // scheduled/unattended runs leave them asleep; interactive runs wake them.
     const running = opts.startStopped ? null : await runningDistros();
@@ -290,6 +298,6 @@ export async function discoverEnvironments(opts = {}) {
     }
   }
 
-  if (!opts.machineId) _cache = envs;
+  if (!opts.machineId && !opts.onlyDistros) _cache = envs;
   return envs;
 }

@@ -59,24 +59,6 @@ async function dirBytes(dir) {
   return total;
 }
 
-/** Prompt once for this machine's label + role; persist them in machine-id.json. */
-async function ensureMachineIdentity() {
-  const { persistedMachineIdentity } = await import("../src/environments.mjs");
-  let existing;
-  try { existing = JSON.parse(await readFile(join(BACKUP_DIR, "machine-id.json"), "utf-8")); } catch {}
-  if (existing?.uuid) {
-    log(`This machine: ${existing.label} (role: ${existing.role})`);
-    return existing;
-  }
-  const host = hostname() || "machine";
-  const label = (await ask(`Label for this machine [${host}]: `)).trim() || host;
-  const roleAns = (await ask("Role: [1] work  [2] home  [3] shared (3): ")).trim();
-  const role = roleAns === "1" ? "work" : roleAns === "2" ? "home" : "shared";
-  const identity = await persistedMachineIdentity(BACKUP_DIR, { label, role });
-  log(`This machine: ${identity.label} (role: ${identity.role})`);
-  return identity;
-}
-
 async function loadConfig() {
   try {
     return JSON.parse(await readFile(CONFIG_PATH, "utf-8"));
@@ -98,37 +80,58 @@ async function cmdInit() {
     isGitRepo, initRepo, addRemote, hasRemote, getRemoteUrl, cloneRepo,
     ghAvailable, ghAuthedUser, ghCreateRepo, getRemoteVisibility,
   } = await import("../src/git-sync.mjs");
-  const { install } = await import("../src/scheduler.mjs");
-  const { discoverEnvironments } = await import("../src/environments.mjs");
+  const { install, status: schedStatus } = await import("../src/scheduler.mjs");
+  const { discoverEnvironments, persistedMachineIdentity } = await import("../src/environments.mjs");
 
+  // ── 1. Scan summary (no question) ─────────────────────────────────
   log("🔍 Scanning Claude Code settings...\n");
-
-  // Discover every reachable environment (Windows-native + WSL distros, or a
-  // single native store). init is interactive, so wake stopped WSL distros.
   const environments = await discoverEnvironments({ startStopped: true });
+  const wslEnvs = environments.filter((e) => e.kind === "wsl");
   if (environments.length > 1) {
     log(`Found ${environments.length} Claude Code environments:`);
     for (const e of environments) log(`  ${e.id}${e.kind === "wsl" ? "  (WSL — backed up over UNC)" : ""}`);
     log("");
+  } else if (process.platform === "win32" && !wslEnvs.length) {
+    log("WSL not detected — only this OS will be backed up.\n");
   }
-
   const data = await scan();
-  const scopeCount = data.scopes.length;
-  const itemCount = data.items.length;
-
-  log(`Found ${itemCount} items across ${scopeCount} scopes (${environments[0].id}):`);
+  log(`Found ${data.items.length} items across ${data.scopes.length} scopes (${environments[0].id}):`);
   for (const [cat, count] of Object.entries(data.counts)) {
-    if (cat === "total") continue;
-    log(`  ${cat}: ${count}`);
+    if (cat !== "total") log(`  ${cat}: ${count}`);
   }
-  log("");
 
-  // ── Repo + remote setup ──────────────────────────────────────────
+  // ── 2/3. Machine label + role (asked early; PERSISTED after repo
+  //    setup so creating machine-id.json can't pre-create BACKUP_DIR and
+  //    break the join-clone path below) ─────────────────────────────
+  let existingId;
+  try { existingId = JSON.parse(await readFile(join(BACKUP_DIR, "machine-id.json"), "utf-8")); } catch {}
+  let pendingLabel, pendingRole;
+  if (existingId?.uuid) {
+    log(`\nThis machine: ${existingId.label} (role: ${existingId.role})`);
+  } else {
+    const host = hostname() || "machine";
+    pendingLabel = (await ask(`\nLabel for this machine [${host}]: `)).trim() || host;
+    const roleAns = (await ask("Role: [1] work  [2] home  [3] shared (3): ")).trim();
+    pendingRole = roleAns === "1" ? "work" : roleAns === "2" ? "home" : "shared";
+  }
+
+  // ── 4. WSL distro selection (Windows with WSL only) ───────────────
+  //    undefined = all (default) · [] = none · [names] = subset.
+  let wslDistros;
+  if (wslEnvs.length) {
+    if (parseYesNo(await ask(`\nBack up ${wslEnvs.length} detected WSL distro(s)? [Y/n]: `), true)) {
+      const which = (await ask("Which? (comma-sep names, blank = all) [all]: ")).trim();
+      wslDistros = which ? which.split(",").map((s) => s.trim()).filter(Boolean) : undefined;
+    } else {
+      wslDistros = [];
+      log("WSL distros will be skipped — only this OS is backed up.");
+    }
+  }
+
+  // ── 5. Repo + remote setup ────────────────────────────────────────
   // One private repo holds EVERY machine, separated by per-environment
-  // folders (latest/<envId>/) whose names embed the hostname. So the repo
-  // itself is machine-agnostic: the first machine CREATES it, and later
-  // machines JOIN by cloning it (sharing history so pushes don't clobber).
-
+  // folders (latest/<envId>/). The first machine CREATES it; later machines
+  // JOIN by cloning (sharing history so pushes don't clobber).
   async function writeRepoMeta() {
     await writeFile(
       join(BACKUP_DIR, ".gitignore"),
@@ -138,23 +141,14 @@ async function cmdInit() {
         ...LOCAL_IGNORES, "",
       ].join("\n")
     );
-    // Treat every backed-up file as binary: never normalize line endings, so
-    // backups are byte-faithful and restores match the originals exactly.
+    // Treat every backed-up file as binary: never normalize line endings.
     await writeFile(join(BACKUP_DIR, ".gitattributes"), ["* -text", ""].join("\n"));
   }
 
-  async function warnIfPublic() {
-    const vis = await getRemoteVisibility(BACKUP_DIR);
-    if (vis.state === "public") {
-      log(`⚠️  WARNING: ${vis.slug} is PUBLIC. Backups will be blocked until it's private (or you pass --allow-public).`);
-    }
-  }
-
   if ((await isGitRepo(BACKUP_DIR)) && (await hasRemote(BACKUP_DIR))) {
-    log(`Existing backup repo: ${await getRemoteUrl(BACKUP_DIR)}`);
-    await warnIfPublic();
+    log(`\nExisting backup repo: ${await getRemoteUrl(BACKUP_DIR)}`);
   } else {
-    log("Set up the backup repo (one private repo holds every machine):");
+    log("\nSet up the backup repo (one private repo holds every machine):");
     log("  [1] First machine  — create a new private repo");
     log("  [2] Join existing  — clone the repo another machine already uses");
     const mode = (await ask("Choose 1 or 2 (default 1): ")).trim();
@@ -166,7 +160,7 @@ async function cmdInit() {
         const u = await ghAuthedUser();
         if (u) {
           const guess = `https://github.com/${u}/claude-backup.git`;
-          if ((await ask(`Use ${guess}? (Y/n): `)).toLowerCase() !== "n") url = guess;
+          if (parseYesNo(await ask(`Use ${guess}? [Y/n]: `), true)) url = guess;
         }
       }
       if (!url) { log("No repo URL given — aborting. Re-run init when ready."); return; }
@@ -181,7 +175,6 @@ async function cmdInit() {
         log(`Clone failed: ${err.message}`);
         return;
       }
-      await warnIfPublic();
     } else {
       // CREATE — new repo for the first machine.
       await mkdir(BACKUP_DIR, { recursive: true });
@@ -194,30 +187,25 @@ async function cmdInit() {
       let configured = false;
       if (await ghAvailable()) {
         const ghUser = await ghAuthedUser();
-        if (ghUser) {
-          const create = await ask(`Create a private GitHub repo with gh (as ${ghUser})? (Y/n): `);
-          if (create.toLowerCase() !== "n") {
-            const nameAns = await ask("Repo name (default: claude-backup): ");
-            const repoName = nameAns || "claude-backup";
-            try {
-              const url = await ghCreateRepo(repoName);
-              await addRemote(BACKUP_DIR, url);
-              log(`Created and linked: ${url}`);
-              configured = true;
-            } catch (err) {
-              log(`gh repo create failed (${err.message}). Falling back to manual setup.`);
-            }
+        if (ghUser && parseYesNo(await ask(`Create a private GitHub repo with gh (as ${ghUser})? [Y/n]: `), true)) {
+          const repoName = (await ask("Repo name (default: claude-backup): ")).trim() || "claude-backup";
+          try {
+            const url = await ghCreateRepo(repoName);
+            await addRemote(BACKUP_DIR, url);
+            log(`Created and linked: ${url}`);
+            configured = true;
+          } catch (err) {
+            log(`gh repo create failed (${err.message}). Falling back to manual setup.`);
           }
         }
       }
 
       if (!configured) {
         log("Use a PRIVATE repo — backups can contain secrets (MCP keys, settings.local.json, sessions).");
-        const repoUrl = await ask("GitHub repo URL (e.g. git@github.com:you/claude-backup.git): ");
+        const repoUrl = (await ask("GitHub repo URL (e.g. git@github.com:you/claude-backup.git): ")).trim();
         if (repoUrl) {
           await addRemote(BACKUP_DIR, repoUrl);
           log(`Remote added: ${repoUrl}`);
-          await warnIfPublic();
         } else {
           log("Skipping remote setup. Run 'git remote add origin <url>' in ~/.claude-backups/ later.");
         }
@@ -225,40 +213,84 @@ async function cmdInit() {
     }
   }
 
-  // Scheduler setup
-  log("");
-  const intervalStr = await ask("Backup interval in hours (default: 4): ");
-  const interval = parseInt(intervalStr) || 4;
-
-  const nodePath = process.execPath;
-  const cliPath = fileURLToPath(import.meta.url);
-
-  try {
-    const result = await install(nodePath, cliPath, interval);
-    log(`\nScheduler installed (every ${interval}h + on boot)`);
-    if (result.timerPath) log(`  Service: ${result.timerPath}`);
-    if (result.plistPath) log(`  LaunchAgent: ${result.plistPath}`);
-    if (result.taskName) log(`  Scheduled task: ${result.taskName}`);
-  } catch (err) {
-    log(`\nFailed to install scheduler: ${err.message}`);
-    log("You can run backups manually with: npx @seangsisg/claude-code-backup run");
+  // Persist machine identity now that BACKUP_DIR exists (idempotent).
+  if (!existingId?.uuid) {
+    const identity = await persistedMachineIdentity(BACKUP_DIR, { label: pendingLabel, role: pendingRole });
+    log(`This machine: ${identity.label} (role: ${identity.role})`);
   }
 
-  // Save config
-  await saveConfig({ interval, installedAt: new Date().toISOString() });
+  // ── 6. Private-repo acknowledgment gate (only when public/unknown) ─
+  if (await hasRemote(BACKUP_DIR)) {
+    const vis = await getRemoteVisibility(BACKUP_DIR);
+    if (vis.state === "private") {
+      log("Remote verified: private ✓");
+    } else {
+      const why = vis.state === "public"
+        ? `${vis.slug || "the remote"} is PUBLIC`
+        : "the remote's visibility can't be verified (non-GitHub or gh unavailable)";
+      log(`\n⚠ This backup CONTAINS SECRETS (MCP keys, settings.local.json, sessions), and ${why}.`);
+      log("  Use a PRIVATE repo. Pushes to a public repo are blocked unless you pass --allow-public.");
+      if (!parseYesNo(await ask("  I understand and will keep this repo private [y/N]: "), false)) {
+        log("Aborted — point origin at a private repo, then re-run init.");
+        return;
+      }
+    }
+  } else {
+    log("No remote configured — backups stay LOCAL only until you add one.");
+  }
 
-  // Machine identity (label + role) — stamped into env.json and shown wherever
-  // machines are listed (status/list). Prompted once; persisted locally.
-  log("");
-  await ensureMachineIdentity();
+  // ── 7. Interval menu ──────────────────────────────────────────────
+  log("\nBackup interval:");
+  log("  [1] 1h   [2] 4h (recommended)   [3] 8h   [4] 24h   [5] manual (no scheduler)");
+  const intAns = (await ask("Choose 1-5 (default 2): ")).trim();
+  const manual = intAns === "5";
+  const interval = manual ? 4 : ({ "1": 1, "2": 4, "3": 8, "4": 24 }[intAns] || 4);
 
-  // Run first backup
-  log("\nRunning first backup...\n");
-  await cmdRun();
+  // ── 8. Scheduler (idempotent install/update) ──────────────────────
+  let scheduled = false;
+  if (manual) {
+    log("Manual mode — no scheduler installed. Run 'claude-code-backup run' yourself.");
+  } else {
+    let sched = "";
+    try { sched = await schedStatus(); } catch {}
+    const already = sched && !/not installed|not loaded|no such|could not|disabled/i.test(sched);
+    const prompt = already
+      ? `A scheduler is already installed. Update it to every ${interval}h? [Y/n]: `
+      : `Install scheduler (every ${interval}h + on boot)? [Y/n]: `;
+    if (parseYesNo(await ask(prompt), true)) {
+      const nodePath = process.execPath;
+      const cliPath = fileURLToPath(import.meta.url);
+      try {
+        const result = await install(nodePath, cliPath, interval);
+        scheduled = true;
+        log(`Scheduler installed (every ${interval}h + on boot)`);
+        if (result.taskName) log(`  Scheduled task: ${result.taskName}`);
+        if (result.timerPath) log(`  Service: ${result.timerPath}`);
+        if (result.plistPath) log(`  LaunchAgent: ${result.plistPath}`);
+      } catch (err) {
+        log(`Failed to install scheduler: ${err.message}`);
+        log("You can run backups manually with: npx @seangsisg/claude-code-backup run");
+      }
+    }
+  }
 
-  log("\n✓ Setup complete! Your Claude Code settings are backed up.");
+  // Save config (wslDistros undefined = all; omitted keys keep prior values).
+  await saveConfig({ ...(await loadConfig()), interval, manual, wslDistros, installedAt: new Date().toISOString() });
+
+  // ── 9. Run first backup now? ──────────────────────────────────────
+  if (parseYesNo(await ask("\nRun the first backup now? [Y/n]: "), true)) {
+    log("\nRunning first backup...\n");
+    await cmdRun();
+  } else {
+    log("\nSkipped — run 'claude-code-backup run' when ready.");
+  }
+
+  log("\n✓ Setup complete.");
   log("  Backup location: ~/.claude-backups/latest/");
-  log(`  Auto-backup: every ${interval} hours + on boot`);
+  log(manual ? "  Auto-backup: manual (no scheduler)"
+    : scheduled ? `  Auto-backup: every ${interval}h + on boot`
+    : "  Auto-backup: not scheduled");
+  log("  Next: 'claude-code-backup status' · 'list' · 'doctor'");
 }
 
 async function cmdRun() {
@@ -283,12 +315,16 @@ async function cmdRunLocked() {
   // (--quiet) runs leave them asleep and capture WSL only when it's running.
   const startStopped = !process.argv.includes("--quiet");
 
+  // Honor the per-machine WSL allowlist chosen at init (undefined = all distros).
+  const cfg = await loadConfig();
+
   log("Scanning and exporting...");
   let exported;
   try {
     exported = await exportLatest(BACKUP_DIR, {
       startStopped,
       confirmCollision: process.argv.includes("--confirm-collision"),
+      onlyDistros: cfg.wslDistros,
     });
   } catch (err) {
     log(`\n✗ Backup aborted: ${err.message}`);

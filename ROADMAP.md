@@ -261,7 +261,7 @@ This machine:
 - [x] **M3** per-item labels + selective restore filters (only/exclude categories/labels)
 - [x] **M2** sync groups + cross-group leak guard (opt-in; fail-closed once groups declared)
 - [x] **M4** per-machine exclude.json at export
-- [ ] **UX** new init question script
+- [x] **UX** new init question script
 - [x] **UX** status rewrite (scan env dirs, group by label, staleness/unpushed/warnings)
 - [x] **UX** `list` command
 - [x] **UX** `doctor` command

@@ -248,6 +248,7 @@ async function exportToRoot(rootDir, opts = {}) {
   const environments = await discoverEnvironments({
     startStopped: opts.startStopped,
     machineId: opts.machineId,
+    onlyDistros: opts.onlyDistros,        // per-machine WSL allowlist (init choice)
   });
   const identity = opts.identity;
   if (!identity?.uuid) throw new Error("exportToRoot requires a persisted machine identity (opts.identity)");
