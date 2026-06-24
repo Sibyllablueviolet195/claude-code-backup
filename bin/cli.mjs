@@ -16,7 +16,7 @@ import { fileURLToPath } from "node:url";
 import { mkdir, readFile, writeFile, access, readdir, stat } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { acquireLock, releaseLock, ensureLocalIgnores, LOCAL_IGNORES } from "../src/runlock.mjs";
-import { renderMachineLines, formatAge, isStale, renderCheck, tallyChecks } from "../src/cli-ui.mjs";
+import { renderMachineLines, formatAge, isStale, renderCheck, tallyChecks, parseYesNo, chooseIndex, metaParen } from "../src/cli-ui.mjs";
 
 const HOME = homedir();
 const BACKUP_DIR = join(HOME, ".claude-backups");
@@ -538,7 +538,120 @@ function argList(flag) {
   return v ? v.split(",").map((s) => s.trim()).filter(Boolean) : null;
 }
 
+/**
+ * One readline interface for a whole interactive flow. Creating a fresh
+ * interface per prompt (the `ask` helper) drops buffered input when stdin is a
+ * pipe rather than a TTY, so multi-question flows must share one.
+ */
+function prompter() {
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  let closed = false;
+  rl.on("close", () => { closed = true; });
+  return {
+    // Resolve to "" if stdin closes (EOF / Ctrl-D / piped input runs out) rather
+    // than throwing ERR_USE_AFTER_CLOSE — callers treat "" as the safe default
+    // (blank = auto, and the apply confirmation defaults to No).
+    question: (q) => new Promise((res) => {
+      if (closed) return res("");
+      let done = false;
+      const onClose = () => { if (!done) { done = true; res(""); } };
+      rl.once("close", onClose);
+      rl.question(q, (a) => { if (!done) { done = true; rl.off("close", onClose); res(a.trim()); } });
+    }),
+    close: () => { if (!closed) rl.close(); },
+  };
+}
+
+async function cmdRestoreInteractive() {
+  const { restore } = await import("../src/restorer.mjs");
+  const { readBackupIndex } = await import("../src/exporter.mjs");
+  const { discoverEnvironments } = await import("../src/environments.mjs");
+
+  let environments = [];
+  try { ({ environments } = await readBackupIndex(join(BACKUP_DIR, "latest"))); } catch {}
+  if (!environments.length) {
+    log("No restorable environments found in backup. Run 'claude-code-backup run' first.");
+    process.exitCode = 1;
+    return;
+  }
+
+  const p = prompter();
+  try {
+    // 1. Pick the SOURCE environment.
+    log("Restore (interactive) — pick a SOURCE environment to restore FROM:\n");
+    environments.forEach((e, i) =>
+      log(`  [${i + 1}] ${e.id}   ${metaParen(e.label, e.role)}   ${e.copied ?? 0} items`));
+    const sChoice = chooseIndex(await p.question("\nSource number (blank = all environments): "), environments.length);
+    if (sChoice.bad) log(`'${sChoice.bad}' isn't a listed number — using all environments.`);
+    const from = sChoice.idx ? environments[sChoice.idx - 1].id : null;
+    log(from ? `Source: ${from}` : "Source: all environments (each maps to its best local match)");
+
+    // 2. Pick the DESTINATION environment (local).
+    let to = null;
+    let dests = [];
+    try { dests = await discoverEnvironments({ startStopped: true }); } catch {}
+    if (dests.length > 1) {
+      log("\nPick a DESTINATION environment to restore INTO:\n");
+      dests.forEach((d, i) => log(`  [${i + 1}] ${d.id}`));
+      const dChoice = chooseIndex(await p.question("\nDest number (blank = auto best-match): "), dests.length);
+      if (dChoice.bad) log(`'${dChoice.bad}' isn't a listed number — using auto best-match.`);
+      to = dChoice.idx ? dests[dChoice.idx - 1].id : null;
+    } else if (dests.length === 1) {
+      log(`\nDestination: ${dests[0].id} (only local environment).`);
+    }
+    if (to) log(`Destination: ${to}`);
+
+    // 3. Dry-run preview (nothing written).
+    log("\n— Dry run (no files written) —");
+    const base = { from, to, log };
+    let preview;
+    try {
+      preview = await restore(BACKUP_DIR, { ...base, apply: false });
+    } catch (err) {
+      log(`\nRestore preview failed: ${err.message}`);
+      process.exitCode = 1;
+      return;
+    }
+    log(`\nWould restore: ${preview.restored} files/dirs, ${preview.merged} MCP merges, ${preview.skipped} skipped`);
+    if (preview.refused?.length) log(`Refused by leak guard: ${preview.refused.join(", ")} (add a sync group to allow)`);
+
+    // 4. Confirm, then apply.
+    if (!parseYesNo(await p.question("\nApply this restore now? [y/N]: "), false)) {
+      log("Aborted — nothing was written.");
+      return;
+    }
+    let force = false;
+    if (preview.conflicts?.length) {
+      force = parseYesNo(
+        await p.question(`\n${preview.conflicts.length} local file(s) are NEWER than the backup. Overwrite them? [y/N]: `), false);
+      if (!force) { log("Aborted — local changes kept; nothing was written."); return; }
+    }
+    let result = await restore(BACKUP_DIR, { ...base, apply: true, force });
+    // Conflicts can appear BETWEEN the preview and the apply (a local file changed
+    // in the meantime). Rather than the misleading "re-run" advice, ask inline.
+    if (result.aborted && !force) {
+      const n = result.conflicts?.length ?? 0;
+      if (parseYesNo(await p.question(`\n${n} local file(s) changed since the preview (now newer than the backup). Overwrite them? [y/N]: `), false)) {
+        result = await restore(BACKUP_DIR, { ...base, apply: true, force: true });
+      }
+    }
+    if (result.aborted) {
+      log("\nAborted — local changes kept; nothing was written.");
+      process.exitCode = 1;
+      return;
+    }
+    log(`\nRestored: ${result.restored} files/dirs, ${result.merged} MCP merges, ${result.skipped} skipped`);
+    if (result.errors.length) {
+      log(`Warnings (${result.errors.length}):`);
+      for (const e of result.errors.slice(0, 10)) log(`  - ${e}`);
+    }
+  } finally {
+    p.close();
+  }
+}
+
 async function cmdRestore() {
+  if (process.argv.includes("--interactive")) return cmdRestoreInteractive();
   const { restore } = await import("../src/restorer.mjs");
   const apply = process.argv.includes("--apply");
   const opts = {
@@ -625,7 +738,7 @@ switch (command) {
     log("  claude-code-backup restore     Restore from backup (dry-run; add --apply)");
     log("  claude-code-backup uninstall   Remove scheduled backup\n");
     log("  run flags:     --quiet  --allow-public  --confirm-collision");
-    log("  restore flags: --apply  --from <envId>  --to <envId>  --scope <id>  --force  --verbose");
+    log("  restore flags: --interactive  --apply  --from <envId>  --to <envId>  --scope <id>  --force  --verbose");
     log("    selective:   --only-categories a,b  --exclude-categories a,b");
     log("                 --include-labels x,y   --exclude-labels x,y   (e.g. --exclude-labels sensitive)");
     log("Backs up Windows-native AND WSL stores; restores across machines and OSes.");

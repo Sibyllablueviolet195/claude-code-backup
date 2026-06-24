@@ -76,6 +76,26 @@ export function groupByMachine(environments) {
   return groups;
 }
 
+/**
+ * Parse a 1-based menu selection. Blank → { idx: null } (the "all/auto" default).
+ * A non-numeric or out-of-range answer → { idx: null, bad: <raw> } so the caller
+ * can warn instead of silently mis-selecting (parseInt("2abc")===2 footgun).
+ */
+export function chooseIndex(answer, count) {
+  const a = String(answer ?? "").trim();
+  if (a === "") return { idx: null };
+  if (!/^\d+$/.test(a)) return { idx: null, bad: a };
+  const i = parseInt(a, 10);
+  if (i < 1 || i > count) return { idx: null, bad: a };
+  return { idx: i };
+}
+
+/** Format a machine's "(label · role)" parenthetical, omitting absent parts. */
+export function metaParen(label, role) {
+  const meta = [label, role].filter(Boolean).join(" · ");
+  return meta ? `(${meta})` : "";
+}
+
 /** Icons for doctor/check output, keyed by severity level. */
 export const CHECK_ICON = { ok: "✓", warn: "⚠", fail: "✗" };
 
