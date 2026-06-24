@@ -156,6 +156,49 @@ export async function getRemoteVisibility(dir) {
 }
 
 /**
+ * Local-only branch sync summary for `status` — how far this branch has diverged
+ * from its origin counterpart and whether the worktree is dirty. Reads existing
+ * refs only (NO fetch), so it's fast and offline-safe; counts reflect the last
+ * time we synced with the remote.
+ *
+ * Returns { branch, ahead, behind, dirty, hasUpstream }, or { branch:null } if
+ * not a git repo. `ahead` = local commits not on origin (i.e. unpushed),
+ * `behind` = origin commits not local, `dirty` = changed/untracked files.
+ */
+export async function getBranchSync(dir) {
+  let branch;
+  try {
+    // --show-current works on an UNBORN branch (fresh repo, no commits yet),
+    // where `rev-parse --abbrev-ref HEAD` would error. Empty = detached HEAD.
+    const { stdout } = await git(["branch", "--show-current"], dir);
+    branch = stdout.trim() || "(detached)";
+  } catch {
+    return { branch: null };
+  }
+  // Detached HEAD has no origin/<branch> to compare against, so the rev-list
+  // below throws and hasUpstream stays false — we still report dirty count.
+  let ahead = 0, behind = 0, hasUpstream = false;
+  try {
+    // left-right of origin/<branch>...HEAD: left = behind, right = ahead.
+    const { stdout } = await git(
+      ["rev-list", "--left-right", "--count", `refs/remotes/origin/${branch}...HEAD`], dir
+    );
+    const [l, r] = stdout.trim().split(/\s+/);
+    behind = parseInt(l, 10) || 0;
+    ahead = parseInt(r, 10) || 0;
+    hasUpstream = true;
+  } catch {
+    // No remote-tracking ref yet (never pushed) — leave hasUpstream false.
+  }
+  let dirty = 0;
+  try {
+    const { stdout } = await git(["status", "--porcelain"], dir);
+    dirty = stdout.split("\n").filter((l) => l.trim()).length;
+  } catch {}
+  return { branch, ahead, behind, dirty, hasUpstream };
+}
+
+/**
  * Stage all changes, commit, and push.
  * @param {string} dir
  * @param {{ allowPublic?: boolean }} [opts]  bypass the public-remote guard

@@ -13,10 +13,10 @@
 import { join } from "node:path";
 import { homedir, hostname } from "node:os";
 import { fileURLToPath } from "node:url";
-import { mkdir, readFile, writeFile, access } from "node:fs/promises";
+import { mkdir, readFile, writeFile, access, readdir, stat } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { acquireLock, releaseLock, ensureLocalIgnores, LOCAL_IGNORES } from "../src/runlock.mjs";
-import { renderMachineLines } from "../src/cli-ui.mjs";
+import { renderMachineLines, formatAge } from "../src/cli-ui.mjs";
 
 const HOME = homedir();
 const BACKUP_DIR = join(HOME, ".claude-backups");
@@ -42,6 +42,21 @@ function ask(question) {
 
 async function exists(p) {
   try { await access(p); return true; } catch { return false; }
+}
+
+/** Recursively sum the byte size of a directory tree (best-effort; skips unreadable entries). */
+async function dirBytes(dir) {
+  let total = 0;
+  let entries;
+  try { entries = await readdir(dir, { withFileTypes: true }); } catch { return 0; }
+  for (const e of entries) {
+    const p = join(dir, e.name);
+    try {
+      if (e.isDirectory()) total += await dirBytes(p);
+      else { total += (await stat(p)).size; }
+    } catch {}
+  }
+  return total;
 }
 
 /** Prompt once for this machine's label + role; persist them in machine-id.json. */
@@ -352,69 +367,82 @@ async function cmdList() {
 }
 
 async function cmdStatus() {
-  const { status } = await import("../src/scheduler.mjs");
-  const config = await loadConfig();
+  const { status: schedStatus } = await import("../src/scheduler.mjs");
+  const { readBackupIndex } = await import("../src/exporter.mjs");
+  const { localMachineUuid } = await import("../src/sync-config.mjs");
+  const { isGitRepo, hasRemote, getRemoteUrl, getRemoteVisibility, getBranchSync } =
+    await import("../src/git-sync.mjs");
 
-  if (config.lastRun) {
-    const ago = Math.round((Date.now() - new Date(config.lastRun).getTime()) / 60000);
-    log(`Last backup: ${config.lastRun} (${ago} min ago)`);
-    log(`  Items backed up: ${config.lastCopied || "unknown"}`);
-    log(`  Errors: ${config.lastErrors || 0}`);
+  const config = await loadConfig();
+  const interval = config.interval || 4;
+  const latestDir = join(BACKUP_DIR, "latest");
+  const warnings = [];
+
+  log("claude-code-backup — status\n");
+
+  // ── Repo + remote + visibility (C5: re-verify every status; a repo can be
+  //    flipped public after init, and the backup holds secrets) ────────────
+  const isRepo = await isGitRepo(BACKUP_DIR);
+  if (!isRepo) {
+    log(`Repo:   ${BACKUP_DIR}  (not initialized — run 'claude-code-backup init')`);
+  } else if (await hasRemote(BACKUP_DIR)) {
+    const url = await getRemoteUrl(BACKUP_DIR);
+    const vis = await getRemoteVisibility(BACKUP_DIR);
+    const visTag = vis.state === "private" ? "(private ✓)"
+      : vis.state === "public" ? "(PUBLIC ⚠)"
+      : "(visibility unknown)";
+    log(`Repo:   ${BACKUP_DIR}  →  ${url}  ${visTag}`);
+    if (vis.state === "public") {
+      warnings.push("Remote is PUBLIC — backups are BLOCKED until it's private (or pass --allow-public). Rotate any exposed secrets.");
+    } else if (vis.state === "unknown") {
+      warnings.push("Remote visibility could not be verified — ensure it's private; the backup holds secrets.");
+    }
   } else {
-    log("No backup has been run yet.");
+    log(`Repo:   ${BACKUP_DIR}  (no remote configured)`);
+    warnings.push("No remote configured — backups stay local only. Run 'init' to link a private repo.");
   }
 
-  // Show every machine/env in the backup, computed ON READ from env dirs (not
-  // the clobberable top-level cache — C6), grouped by machine label.
-  try {
-    const { readBackupIndex } = await import("../src/exporter.mjs");
-    const { environments } = await readBackupIndex(join(BACKUP_DIR, "latest"));
-    if (environments.length) {
-      log("\nMachines in backup:");
-      const byLabel = new Map();
-      for (const e of environments) {
-        const key = e.label || "(unlabeled)";
-        if (!byLabel.has(key)) byLabel.set(key, []);
-        byLabel.get(key).push(e);
-      }
-      for (const [label, envs] of byLabel) {
-        const role = envs[0].role ? ` · role: ${envs[0].role}` : "";
-        log(`  ${label}${role}`);
-        for (const e of envs) {
-          const when = e.lastBackupAt ? new Date(e.lastBackupAt).toISOString().slice(0, 16).replace("T", " ") : "never";
-          log(`    ${e.id}   ${e.copied ?? 0} items   ${when}`);
-        }
-      }
+  if (isRepo) {
+    const bs = await getBranchSync(BACKUP_DIR);
+    if (bs.branch) {
+      const div = bs.hasUpstream ? `${bs.ahead} ahead / ${bs.behind} behind` : "no upstream yet";
+      log(`Branch: ${bs.branch}  ·  ${div}  ·  ${bs.dirty} uncommitted`);
+      if (bs.hasUpstream && bs.ahead > 0) warnings.push(`${bs.ahead} local commit(s) not pushed to origin.`);
     }
-  } catch {}
+  }
 
-  log("\nScheduler status:");
-  const s = await status();
-  log(s);
+  // ── Machines in backup (scan env dirs — race-free, C6) ───────────────────
+  let environments = [];
+  try { ({ environments } = await readBackupIndex(latestDir)); } catch {}
+  if (environments.length) {
+    for (const e of environments) e.bytes = await dirBytes(join(latestDir, e.id));
+    const thisUuid = await localMachineUuid(BACKUP_DIR);
+    log("\nMachines in backup:");
+    for (const line of renderMachineLines(environments, {
+      thisUuid, intervalHours: interval, nowMs: Date.now(), showSize: true, showStale: true,
+    })) log(line);
+  }
 
-  // Check git status
-  const { isGitRepo, hasRemote, getRemoteUrl, getRemoteVisibility } = await import("../src/git-sync.mjs");
-  if (await isGitRepo(BACKUP_DIR)) {
-    log("\nGit repo: ~/.claude-backups/");
-    if (await hasRemote(BACKUP_DIR)) {
-      log(`Remote: ${await getRemoteUrl(BACKUP_DIR)}`);
-      // C5: re-verify visibility on every status — a repo can be flipped public
-      // after init, and the backup contains secrets.
-      const vis = await getRemoteVisibility(BACKUP_DIR);
-      const tag = vis.state === "private" ? "private ✓"
-        : vis.state === "public" ? "PUBLIC ⚠"
-        : "unknown (not a verifiable GitHub remote)";
-      log(`  Visibility: ${tag}`);
-      if (vis.state === "public") {
-        log("  ⚠ Backups are BLOCKED until this repo is private (or you pass --allow-public).");
-      } else if (vis.state === "unknown") {
-        log("  Treat this as untrusted — ensure the remote is private; the backup holds secrets.");
-      }
-    } else {
-      log("Remote: not configured");
-    }
+  // ── This machine: scheduler + last run ───────────────────────────────────
+  log("\nThis machine:");
+  let sched = "";
+  try { sched = await schedStatus(); } catch {}
+  const installed = sched && !/not installed|not loaded|no such|could not|disabled/i.test(sched);
+  log(`  Scheduler: ${installed ? `installed · every ${interval}h` : "not installed (run 'claude-code-backup init')"}`);
+  // Power users debugging the scheduler can see the raw OS output with --verbose.
+  if (process.argv.includes("--verbose") && sched) {
+    for (const line of sched.trimEnd().split("\n")) log(`    | ${line}`);
+  }
+  if (config.lastRun) {
+    log(`  Last run:  ${config.lastCopied ?? "?"} items · ${config.lastErrors || 0} errors · ${formatAge(config.lastRun, Date.now())}`);
   } else {
-    log("\nGit repo: not initialized. Run 'claude-code-backup init' first.");
+    log("  Last run:  never");
+  }
+
+  // ── Warnings (C2 rebase / C5 secrets+visibility surface here) ────────────
+  if (warnings.length) {
+    log("\nWarnings:");
+    for (const w of warnings) log(`  ⚠ ${w}`);
   }
 }
 
@@ -514,7 +542,7 @@ switch (command) {
     log("Usage:");
     log("  claude-code-backup init        Set up backup repo + schedule");
     log("  claude-code-backup run         Run backup now");
-    log("  claude-code-backup status      Show backup status");
+    log("  claude-code-backup status      Show backup status (add --verbose for raw scheduler output)");
     log("  claude-code-backup list        List machines/envs in the backup");
     log("  claude-code-backup restore     Restore from backup (dry-run; add --apply)");
     log("  claude-code-backup uninstall   Remove scheduled backup\n");
